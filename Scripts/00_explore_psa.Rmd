@@ -1,0 +1,163 @@
+---
+title: "Explore PSA Assay"
+author: "Lauren Howard"
+date: "`r Sys.Date()`"
+output: html_document
+knit: (function(inputFile, encoding) { rmarkdown::render(inputFile, encoding = encoding, output_file = paste0("../Results/IRONMAN PSA exploration.html")) })
+---
+
+<!-- # Set defaults -->
+```{r, echo =FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      warning=FALSE, 
+                      message=FALSE, 
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.show='hold',
+                      size='footnotesize',
+                      fig.width=10,
+                      fig.height=6)
+```
+
+
+<!-- # Load Packages -->
+
+```{r}
+# load packages
+library(readxl)
+library(tidyverse)
+library(lubridate)
+library(here)
+library(dplyr)
+library(labelled)
+library(writexl)
+library(stringr)
+library(janitor)
+# load ironman package
+# Repo: https://github.com/pcctc/ironer
+# Website: https://pcctc.github.io/ironer/
+#devtools::install_github("pcctc/ironer")
+library(ironer)
+library(DT)
+
+```
+
+
+<!-- # Read data -->
+
+```{r}
+load("V:/IRONMAN/2024-11-04/2024-11-04_ironman.Rdata")
+
+```
+
+<!-- # Site -->
+
+```{r}
+subject_data <- medidata$subject %>%
+  select(subject, 
+         site, 
+         site_name_short,
+         site_country)
+```
+
+
+<!-- # PSA data -->
+
+```{r}
+## PSA
+```{r}
+# # pull data from PSA and HXPSA
+all_psa <- medidata$psa %>%
+  select(subject, psa) %>%
+  bind_rows(medidata$hxpsa %>%
+              select(subject, psa=hxpsaval)) %>%
+  # replace <# to 0 and ># to #, replace comma to period
+  mutate(# replace <# to #
+         psa = gsub("<", "", psa),
+         # replace ># to #
+         psa = str_remove(psa, ">"),
+         # replace comma to period
+         psa = gsub(",", "\\.", psa),
+         # replace double period to period
+         psa = gsub("\\.\\.", "\\.", psa),
+         # replace slash to to period
+         psa = gsub("/", "\\.", psa),
+         # replace .0. to 0.
+         psa = gsub("\\.0\\.", "0\\.", psa),
+         # remove leading character
+         psa = gsub("z", "", psa),
+         # strip spaces
+         psa = trimws(psa),
+         # convert to numeric
+         psa = as.numeric(psa)) %>%
+  filter(!is.na(psa)) %>% 
+  left_join(subject_data, by="subject")
+
+less_psa <- medidata$psa %>%
+  select(subject, psa) %>%
+  bind_rows(medidata$hxpsa %>%
+              select(subject, psa=hxpsaval)) %>%
+  filter(grepl("<", psa)) %>% 
+    mutate(# remove space after <
+        psa = gsub("< ", "<", psa),
+      # replace comma to period
+         psa = gsub(",", "\\.", psa),
+         # replace double period to period
+         psa = gsub("\\.\\.", "\\.", psa),
+         # replace slash to to period
+         psa = gsub("/", "\\.", psa),
+         # replace .0. to 0.
+         psa = gsub("\\.0\\.", "0\\.", psa),
+         # remove leading character
+         psa = gsub("z", "", psa),
+         # strip spaces
+         psa = trimws(psa),
+         # remove trailing zeros
+         psa = sub("0+$", "", psa)) %>% 
+  left_join(subject_data, by="subject") %>% 
+  group_by(psa, site) %>% 
+  summarize(n = n()) %>% 
+  arrange(site)
+
+```
+
+# Count of PSAs with "<" by site
+```{r}
+
+datatable(less_psa, 
+          editable = TRUE,
+          rownames = FALSE,
+          extensions = 'Buttons',
+          options = list(
+            dom = 'Blfrtip')
+          )
+```
+
+
+# Lowest PSA by site
+```{r}
+min_psa_site <- all_psa %>% 
+  group_by(site, site_country) %>% 
+  summarize(n = n(), min_psa = min(psa)) %>% 
+  arrange(-min_psa)
+
+datatable(min_psa_site, 
+          editable = TRUE,
+          rownames = FALSE,
+          extensions = 'Buttons',
+          options = list(
+            dom = 'Blfrtip')
+          )
+
+```
+
+# Distribution of PSAs <=0.2
+```{r}
+all_psa %>% 
+  filter(psa<=0.2) %>% 
+  ggplot(aes(x=psa)) +
+  geom_histogram(binwidth = 0.01, fill = "blue", color = "black") +
+  labs(title = "Histogram of PSAs <=0.02", x = "PSA", y = "Frequency")
+
+```
+

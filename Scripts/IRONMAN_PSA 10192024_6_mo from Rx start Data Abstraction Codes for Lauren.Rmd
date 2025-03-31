@@ -1,0 +1,492 @@
+---
+title: "IRONMAN_Prelim_PSA 6 months 10192024"
+author: "Roy Soumyajit"
+date: "2024-10-21"
+output: html_document
+---
+
+```{r setup, include=F, warning=F}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen=999)
+library(pacman)
+p_load(tidyverse, dynpred, ggplot2, survival, survminer, KMunicate, ggsurvfit, tidycmprsk, lme4, readr, readxl)
+library(adjustedCurves)
+library(WeightIt)
+library(SuperLearner)
+library(pbkrtest)
+library(mice)
+library(haven)
+library(table1)
+library(naniar)
+library(finalfit)
+library(tableone)
+library(lubridate)
+library(ironer)
+```
+
+
+## Methods
+*We included patients from PCCTC IRONMAN cohort with available baseline data on treatment regimen and PSA values at baseline, and 1 PSA value after baseline and by month 9.*
+
+*We stratified patients into 3 groups depending on the lowest PSA they had at or before 6 months. These groups included PSA nadir <0.02 ng/mL, 0.02 to 0.2 ng/mL, and >0.2 ng/mL, respectively.*
+
+*A landmark population was constructed with patients who were alive and under follow-up for more than 12 months.*
+
+*We determined 3-year OS rates for the three PSA nadir groups. Subsequently we applied Cox proportional hazard regression model to determine the adjusted association of PSA nadir with OS. We used two models - one with time to PSA nadir and one without time to PSA nadir*
+
+
+*We applied competing risk methods described by Fine and Gray to determine the cumulative incidence of prostate cancer specific mortality (PCSM) in these three PSA nadir groups. Deaths from causes other than prostate cancer were considered as competing events. Again we applied multivariable CRR with and without time to PSA nadir.*
+
+
+# Data analysis and Cleaning {.tabset}
+
+## Import data and merge
+
+```{r data}
+
+load("~/Documents/IRONMAN/2024-09-23_ironman.RData")
+
+###########################################################
+cohort <- medidata$cohort%>%
+  filter(cohort=="mHSPC")%>%
+  select(subject, cohort, denovomet_disease)%>%
+  distinct(subject, .keep_all = T)
+
+```
+
+
+## Assigning first line treatment
+```{r data treatment, echo=T}
+
+### Treatment preparation
+treatment_prep <- 
+  medidata$ca_cm_derived %>% 
+  dplyr::select(
+    subject, treatment, exstdat_int, exendat_int, 
+    treatment_recode = trt_treatment_recode, treatment_category = trt_treatment_category)
+
+treatment_prep <- treatment_prep%>%
+  filter(subject %in% cohort$subject)
+
+treatment_prep <- treatment_prep%>%
+  filter(!is.na(exstdat_int)) %>% 
+  # remove treatments not counted as a line of therapy
+  filter(!treatment_category %in% c("Steroid", "Bone-Modifying Agent", "Bisphosphonates", "Antidiabetic"))%>%
+  # keep relevant fields
+  select(subject, exstdat_int, exendat_int, treatment_category, treatment_recode)
+
+
+##### Collecting consent date and matching with the mHSPC cohort
+consent <- medidata$ic%>%select(subject, cnstdate_int)
+consent <- consent%>%
+  filter(subject %in% cohort$subject)
+
+#### To calculate gap from consent to start of treatment
+
+treatment_prep <- left_join(treatment_prep, consent, by = "subject")
+
+treatment_prep <- treatment_prep%>%
+  mutate(gap = as.duration(cnstdate_int%--%exstdat_int)/ddays(1))%>%
+  filter(gap>=(-90))
+
+#### Next step
+treatment_lot <- treatment_prep %>%
+  # sort by subject and treatment start date
+  arrange(subject, exstdat_int) %>%
+  # within each subject, assign line of therapy
+  group_by(subject) %>%
+  group_modify(~ ironer::assign_lot(
+    .data = .x, 
+    # note, you could use treatment_category here as well to get a high level
+    # view of line of therapy by category
+    treatment = treatment_category,
+    dt_trt_observed = exstdat_int, 
+    dt_treatment_end = exendat_int
+  ))%>%
+  ungroup()  
+
+```
+
+## Selecting Patients who Received ARPI
+```{r}
+
+############################### First lot ARPI
+first_lot <- treatment_lot%>%
+  filter(lot==1)
+  
+
+first_arpi <- first_lot%>%
+  filter(str_detect(treatment_category,"AR Signaling Inhibitor"))%>%
+  distinct(subject, .keep_all = T)
+
+
+first_arpi <- first_arpi%>%
+  select(subject,regimen,treatment_category,treatment_recode)
+
+################################ Second lot ARPI
+
+second_lot <- treatment_lot%>%
+  filter(lot==2)
+
+### First select who received ADT in first lot
+first_adt <- first_lot%>%
+  filter(treatment_category=="ADT" & treatment_recode != "Bicalutamide")%>%
+  distinct(subject, .keep_all = T)%>%
+  rename(first_treatment_category = treatment_category, 
+         first_dt_lot_start = dt_lot_start,
+         first_dt_lot_last_obs = dt_lot_last_obs)%>%
+  select(subject,first_treatment_category,first_dt_lot_start,first_dt_lot_last_obs)
+
+### Merging second lot patients to who received ADT in first lot
+second_lot <- merge(second_lot, first_adt, by = "subject")
+
+### Now out of this merged cohort choose those who received ARPI within 90 days
+second_arpi <- second_lot%>%
+  filter(str_detect(treatment_category,"AR Signaling Inhibitor"))%>%
+  distinct(subject, .keep_all = T)%>%
+  #### Calculating gap
+  mutate(gap_second = as.duration(first_dt_lot_start%--%exstdat_int)/ddays(1))%>%
+  #### Selecting patients with <90 days gap
+  filter(gap_second<=90)
+
+#### Excluding wrongly coded ARPI regimens
+second_arpi <- second_arpi%>%
+  filter(regimen%in% c("ADT, AR Signaling Inhibitor","ADT, AR Signaling Inhibitor, Chemotherapy","AR Signaling Inhibitor","AR Signaling Inhibitor, NA","AR Signaling Inhibitor, Chemotherapy"))%>%
+  rename(second_dt_lot_start = dt_lot_start,
+         second_dt_lot_last_obs = dt_lot_last_obs,
+         second_regimen = regimen,
+         second_treatment_category = treatment_category)
+
+### Renaming columns
+second_arpi <- second_arpi%>%
+  select(subject,second_regimen,second_treatment_category,treatment_recode)%>%
+  rename(treatment_category = second_treatment_category,
+         regimen = second_regimen)
+
+########################### Third ARPI
+
+third_lot <- treatment_lot%>%
+  filter(lot==3)
+### First select who received ADT in first lot
+third_lot <- merge(third_lot, first_adt, by = "subject")
+
+### Now out of this merged cohort choose those who received ARPI within 90 days
+third_arpi <- third_lot%>%
+  filter(str_detect(treatment_category,"AR Signaling Inhibitor"))%>%
+  distinct(subject, .keep_all = T)%>%
+  mutate(gap_third = as.duration(first_dt_lot_start%--%exstdat_int)/ddays(1))%>%
+  filter(gap_third<=90)
+
+### Selecting necessary columns
+third_arpi <- third_arpi%>%
+  select(subject, regimen, treatment_category, treatment_recode)
+
+
+### Adding all these to create the cohort of patients who received ARPI
+ARPI = dplyr::bind_rows(first_arpi,second_arpi,third_arpi)%>%
+  distinct(subject, .keep_all = T)%>%
+  mutate(ARPI=1)
+
+```
+
+## Merging date of treatment initiation with the ARPI intensified group
+```{r}
+
+### For each patient we selected the earliest date of treatment start (which could be ADT as well) - the reason is even simple ADT can cause PSA to drop
+
+treatment_start_date <- treatment_lot%>%
+  group_by(subject)%>%
+  slice_min(order_by = dt_lot_start)%>%
+  select(subject, dt_lot_start)%>%
+  ungroup()%>%
+  distinct(subject, .keep_all = T)
+
+ARPI <- left_join(ARPI, treatment_start_date, by = "subject")
+```
+
+## Selecting patients with docetaxel
+```{r}
+### First lot Chemo
+first_chemo <- first_lot%>%
+  filter(str_detect(treatment_category,"Chemotherapy"))%>%
+  distinct(subject, .keep_all = T)
+
+
+first_chemo <- first_chemo%>%
+  select(subject,regimen,treatment_category,treatment_recode)
+
+### Second lot Chemo
+
+second_chemo <- second_lot%>%
+  filter(str_detect(treatment_category,"Chemotherapy"))%>%
+  distinct(subject, .keep_all = T)%>%
+  mutate(gap_second = as.duration(first_dt_lot_start%--%exstdat_int)/ddays(1))%>%
+  filter(gap_second<=90)
+
+
+second_chemo <- second_chemo%>%
+  filter(treatment_recode=="Docetaxel")%>%
+  rename(second_dt_lot_start = dt_lot_start,
+         second_dt_lot_last_obs = dt_lot_last_obs,
+         second_regimen = regimen,
+         second_treatment_category = treatment_category)
+
+
+second_chemo <- second_chemo%>%
+  select(subject,second_regimen,second_treatment_category,treatment_recode)%>%
+  rename(treatment_category = second_treatment_category,
+         regimen = second_regimen)
+
+### Third lot Chemo
+
+third_chemo <- third_lot%>%
+  filter(str_detect(treatment_category,"Chemotherapy"))%>%
+  distinct(subject, .keep_all = T)%>%
+  mutate(gap_third = as.duration(first_dt_lot_start%--%exstdat_int)/ddays(1))%>%
+  filter(gap_third<=90)
+
+third_chemo <- third_chemo%>%
+  select(subject, regimen, treatment_category, treatment_recode)
+
+#### Combining those who received chemo in first, second, or third lot
+Chemotherapy <- dplyr::bind_rows(first_chemo,second_chemo,third_chemo)%>%
+  distinct(subject, .keep_all = T)%>%
+  mutate(Docetaxel=1)
+```
+
+## Treatment final coding
+```{r}
+
+### Selecting the Subject ID, ARPI, Date of treatment start from ARPI cohort
+ARPI <- ARPI%>%
+  select(subject, ARPI, dt_lot_start)
+
+### Selecting subject ID from the chemotherapy cohort
+Chemotherapy <- Chemotherapy%>%
+  select(subject,Docetaxel)
+
+### We will club the ARPI and Docetaxel info with the original cohort
+cohort <- left_join(cohort,ARPI, by = "subject")
+cohort <- left_join(cohort, Chemotherapy, by = "subject")
+cohort$ADT = 1
+cohort <- cohort%>%
+  replace_na(list(Docetaxel=0, ARPI=0))
+
+###################################################################################
+### Treatment recoding to ADT, ADT+Doce, ADT + ARPI, Triplet
+cohort$treatment = NA
+cohort$treatment[cohort$ARPI==0 & cohort$Docetaxel==0] = "ADT alone"
+cohort$treatment[cohort$ARPI==1 & cohort$Docetaxel==0] = "ADT+ARPI"
+cohort$treatment[cohort$ARPI==0 & cohort$Docetaxel==1] = "ADT+Docetaxel"
+cohort$treatment[cohort$ARPI==1 & cohort$Docetaxel==1] = "Triplet"
+
+#### Selecting patients who received ARPI with ADT or as part of triplet
+cohort1 <- cohort%>%
+  filter(treatment %in% c("Triplet","ADT+ARPI"))
+```
+
+## Merging with baseline data
+```{r}
+########## Derived Baseline Characteristics
+cohort2 <- medidata$subject%>%
+  select(subject, is_metastatic_baseline, gleason_bx_mh, gleason_rp_prpros,gleason_bx_prmi,gleason_rp_prmi,gleason_rp_derived,gleason_combined_derived,gleason_factor,origin_metastatic_baseline)
+
+##### Date of consent
+consent <- medidata$ic%>%select(subject, cnstdate_int) 
+
+#### adding consent date to the cohort with baseline characteristics
+cohort2 <- left_join(cohort2, consent)
+
+####### Merging treatment data (cohort1) with baseline characteristics data
+cohort2 <- merge(cohort2, cohort1, by = "subject")
+
+###### Checking for missing data
+cohort2%>%
+  miss_var_summary()
+
+
+#### Recoding some of the baseline characteristics data
+cohort2 <- cohort2%>%
+  mutate(Gleason.total = ifelse(gleason_factor %in% c("0","<=6","7"),"6-7",
+                                ifelse(gleason_factor %in% c("8","9","10"),"8-10","Not reported")),
+         Liver_mets = ifelse(str_detect(origin_metastatic_baseline,"liver"), "Yes","No"),
+         Lung_mets = ifelse(str_detect(origin_metastatic_baseline,"lung"), "Yes","No"),
+         Bone_mets = ifelse(str_detect(origin_metastatic_baseline,"thor|spine|Bone|skull|ext|pelvis"),"Yes","No"),
+         distal_nodes = ifelse(str_detect(origin_metastatic_baseline,"dn"),"Yes","No"))%>%
+  rename(denovomets_yes = is_metastatic_baseline)
+```
+
+
+## Merging Race data
+```{r}
+Race <- medidata$subject%>%
+  select(subject, race_26_1, race_26_2, race_26_3, race_26_4, race_26_5, race_26_6, race_26_7, race_26_other)
+
+
+Race$Race <- apply(Race[, c('race_26_1', 'race_26_2', 'race_26_3', 'race_26_4', 
+                        'race_26_5', 'race_26_6', 'race_26_7', 'race_26_other')], 
+                 1, function(x) {
+  # Count non-NA values
+  non_na_values <- x[!is.na(x)]
+  
+  # If more than one race is present, assign "Multicategory"
+  if (length(non_na_values) > 1) {
+    return("Multicategory")
+  } else if (length(non_na_values) == 1) {
+    return(non_na_values)
+  } else {
+    return(NA)
+  }
+})
+
+Race <- Race%>%
+  replace_na(list(Race = "Not reported"))
+
+cohort2 <- left_join(cohort2, Race%>%select(subject,Race), by = "subject")
+```
+
+
+## Merging follow-up data
+*In 3 cases cause of death was missing. We considered them to die of non-cancer related causes.*
+```{r}
+
+### Getting dates from cycles
+dates <- medidata$cyc_date
+
+
+#### Baseline visit date
+baseline <- dates%>%
+  filter(instance_name=="Baseline 0")%>%
+  dplyr::select(subject, visit_date)%>%
+  rename(date_baseline = visit_date)
+
+### Selecting the earliest date for each subject
+baseline <- baseline%>%
+  group_by(subject)%>%
+  slice_min(order_by = date_baseline)
+
+baseline <- baseline%>%
+  distinct(subject, .keep_all = TRUE)
+
+
+### Last follow-up date
+follow_up <- dates%>%
+  group_by(subject)%>%
+  slice_max(order_by = visit_date)%>%
+  dplyr::select(subject, visit_date)%>%
+  rename(date_lfu = visit_date)
+
+follow_up <- follow_up%>%
+  distinct(subject, .keep_all = T)
+
+follow_up <- merge(baseline, follow_up, by = "subject")
+
+cohort2 <- merge(cohort2, follow_up, by = "subject")
+
+## Calculating OS from treatment start date
+cohort2.1 <- cohort2%>%
+  mutate(OS_date = pmin(date_lfu, deathdate, na.rm = T),
+         OS = as.duration(dt_lot_start%--%OS_date)/dmonths(1),
+         PCSM = as.factor(ifelse(Dead==0,"Alive",
+                       ifelse(Dead==1 & cod=="Prostate Cancer", "PCSM", "OCM"))))
+
+cohort2.1 <- cohort2.1%>%
+  replace_na(list(PCSM="OCM")) 
+### In 3 cases cause of death was missing. We considered them to die of non-cancer related causes.
+###############Univariable Cox regression ##################################################
+explan <- c("age","baseline_psa","baseline_psa_cat","alkcat","csliver","cslung","csdn","csskull","csspine","denovomet_disease","treatment","Gleason.total")
+
+cohort2.1%>%
+  coxphuni(
+    dependent = "Surv(OS,Dead)",
+    explanatory = explan
+  )%>%
+  fit2df()
+
+
+### Factors associated with OS were age, baseline PSA, baseline ALP, Skull involvement, Gleason score, de novo metastatic presentation, and modest association with lung involvement. 
+
+### Factors associated with PSA nadir were age, baseline PSA, baseline ALP, skull involvement, spine involvement, Gleason score, De novo metastatic disease at presentation. 
+
+### Final factors are ge, baseline PSA, baseline ALP, skull involvement, Gleason score, De novo metastatic disease at presentation
+```
+
+## Progression details
+```{r}
+
+#### Using newpq version 4
+prog0 <- medidata$newdisc_pqv4%>%
+  select(subject, instance_name, newpq2_v4, newpq3_v4, newpq4_v4, newpq5_v4, newpq6_v4)%>%
+  filter(newpq3_v4=="Yes"|newpq4_v4=="Yes"|newpq5_v4=="Yes"|newpq6_v4=="Yes")%>%
+  distinct(subject, .keep_all = T)%>%
+  select(subject, instance_name)%>%
+  mutate(any_progression = 1)%>%
+  mutate(time = gsub("Month", "", instance_name) %>% trimws())%>%
+  mutate(time = as.numeric(time))
+  
+#### Using disc_pq
+prog1 <- medidata$disc_pq%>%
+  filter(prim_reason=="Disease Progression (Go to C2)")%>%
+  select(subject,instance_name,c2_psa1, c2_psa2, c3_psa3,c2_rp1, c2_rp2, c2_rp3,c2_rp4,c2_rp5)%>%
+  distinct(subject, .keep_all = T)%>%
+  select(subject, instance_name)%>%
+  mutate(any_progression = 1)%>%
+  mutate(time = gsub("Month", "", instance_name) %>% trimws())%>%
+  mutate(time = as.numeric(time))
+  
+### using new disc_pq version 5
+prog2 <- medidata$newdisc_pqv5%>%
+  select(subject, instance_name, newpq3_v5, newpq4_v5, newpq5_v5, newpq6_v5)%>%
+  mutate(time = gsub("Month", "", instance_name) %>% trimws())%>%
+  filter(newpq3_v5=="Yes"|newpq4_v5=="Yes"|newpq6_v5=="Yes"|newpq5_v5=="Yes")%>%
+  select(subject, instance_name, time)%>%
+  mutate(time = as.numeric(time))%>%
+  mutate(any_progression = 1)%>%
+  replace_na(list(time=0))
+
+
+### combining all three and selecting earliest date of progression
+prog <- bind_rows(prog0, prog1, prog2)%>%
+  group_by(subject)%>%
+  slice_min(order_by = time)
+
+#######################################################
+dates <- medidata$cyc_date%>%
+  select(subject, instance_name, visit_date)
+
+prog <- merge(prog, dates, by = c("subject","instance_name"))%>%
+  rename(prog_instance = instance_name,
+         prog_time = time, 
+         prog_date = visit_date)
+
+cohort2.1 <- left_join(cohort2.1, prog, by = "subject")
+
+cohort2.1 <- cohort2.1%>%
+  replace_na(list(any_progression=0))%>%
+  mutate(prog_date = pmin(prog_date, OS_date, na.rm = T),
+         PFS = as.duration(dt_lot_start%--%prog_date)/dmonths(1),
+         cum_prog = ifelse(any_progression==0 & Dead==0,"censored",
+                           ifelse(any_progression==1 & PFS<=OS,"progression","competing")),
+         progression = ifelse(any_progression==1|Dead==1,1,0))
+
+cohort2.1 <- cohort2.1%>%
+  mutate(cum_prog = factor(cum_prog, levels = c("censored","progression","competing")),
+         PFS = ifelse(PFS<0,OS,PFS))
+
+######################## Univariable association of progression with baseline factors #########
+explan <- c("age","baseline_psa","baseline_psa_cat","alkcat","csliver","cslung","csdn","csskull","csspine","denovomet_disease","treatment","Gleason.total")
+
+cohort2.1%>%
+  coxphuni(
+    dependent = "Surv(PFS,progression)",
+    explanatory = explan
+  )%>%
+  fit2df() 
+### Factors associated with PFS were age, baseline PSA, baseline ALP, Skull involvement, spine involvement, Gleason score, modest association with de novo metastatic presentation. 
+
+### Factors associated with PSA nadir were age, baseline PSA, baseline ALP, skull involvement, spine involvement, Gleason score, De novo metastatic disease at presentation. 
+
+### final factors are ge, baseline PSA, baseline ALP, skull involvement, Gleason score, De novo metastatic disease at presentation, spine involvement
+
+```
+
