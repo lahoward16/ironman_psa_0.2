@@ -93,6 +93,12 @@ all_psa <- medidata$psa %>%
   filter(!is.na(psa)) %>% 
   left_join(subject_data, by="subject")
 
+
+
+```
+
+# Count of PSAs with "<" by site
+```{r}
 less_psa <- medidata$psa %>%
   select(subject, psa) %>%
   bind_rows(medidata$hxpsa %>%
@@ -108,21 +114,17 @@ less_psa <- medidata$psa %>%
          psa = gsub("/", "\\.", psa),
          # replace .0. to 0.
          psa = gsub("\\.0\\.", "0\\.", psa),
+         psa = gsub("\\.<", "<", psa),
          # remove leading character
          psa = gsub("z", "", psa),
          # strip spaces
          psa = trimws(psa),
          # remove trailing zeros
-         psa = sub("0+$", "", psa)) %>% 
+         psa = sub("\\.0+$", "", sub("0+$", "", psa))) %>% 
   left_join(subject_data, by="subject") %>% 
   group_by(psa, site) %>% 
   summarize(n = n()) %>% 
   arrange(site)
-
-```
-
-# Count of PSAs with "<" by site
-```{r}
 
 datatable(less_psa, 
           editable = TRUE,
@@ -133,6 +135,43 @@ datatable(less_psa,
           )
 ```
 
+# Count of PSAs with "<" by value
+```{r}
+less_psa2 <- medidata$psa %>%
+  select(subject, psa) %>%
+  bind_rows(medidata$hxpsa %>%
+              select(subject, psa=hxpsaval)) %>%
+  filter(grepl("<", psa)) %>% 
+    mutate(oldpsa = psa,
+      # remove space after <
+        psa = gsub("< ", "<", psa),
+      # replace comma to period
+         psa = gsub(",", "\\.", psa),
+         # replace double period to period
+         psa = gsub("\\.\\.", "\\.", psa),
+         # replace slash to to period
+         psa = gsub("/", "\\.", psa),
+         # replace .0. to 0.
+         psa = gsub("\\.0\\.", "0\\.", psa),
+         psa = gsub("\\.<", "<", psa),
+         # remove leading character
+         psa = gsub("z", "", psa),
+         # strip spaces
+         psa = trimws(psa),
+         # remove trailing zeros
+         psa = sub("\\.0+$", "", sub("0+$", "", psa))) %>% 
+  left_join(subject_data, by="subject") %>% 
+  group_by(psa) %>% 
+  summarize(n = n()) 
+
+datatable(less_psa2, 
+          editable = TRUE,
+          rownames = FALSE,
+          extensions = 'Buttons',
+          options = list(
+            dom = 'Blfrtip')
+          )
+```
 
 # Lowest PSA by site
 ```{r}
