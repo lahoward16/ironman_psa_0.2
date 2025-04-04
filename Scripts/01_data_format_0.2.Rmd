@@ -1,0 +1,1079 @@
+---
+title: "PSA 0.2 Data Format"
+author: "Lauren Howard"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+<!-- # Set defaults -->
+```{r, echo =FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      warning=FALSE, 
+                      message=FALSE, 
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.show='hold',
+                      size='footnotesize',
+                      fig.width=10,
+                      fig.height=6)
+```
+
+
+# Load Packages
+```{r}
+# load packages
+library(readxl)
+library(tidyverse)
+library(lubridate)
+library(here)
+library(dplyr)
+library(labelled)
+library(writexl)
+library(stringr)
+library(janitor)
+# load ironman package
+# Repo: https://github.com/pcctc/ironer
+# Website: https://pcctc.github.io/ironer/
+#devtools::install_github("pcctc/ironer")
+library(ironer)
+library(DT)
+
+```
+
+
+# Read data
+```{r}
+load("V:/IRONMAN/2024-11-04/2024-11-04_ironman.Rdata")
+
+```
+
+
+# Define functions/create empty list
+```{r}
+# new functions
+`%notin%` <- Negate(`%in%`)
+count_na_func <- function(x) sum(is.na(x))
+tomissing = function(x){ifelse(x=="", NA, x)}
+
+# create empty list for formatted data to go into
+formatted = list()
+
+```
+
+# Pull data
+## Subject data
+```{r}
+# pull subject data; format race data
+formatted$subject_data <- medidata$subject %>%
+  select(subject, 
+         starts_with("race"),
+         ethnicity_27,
+         site, 
+         site_name_short,
+         site_country, 
+         is_metastatic_baseline) %>%
+  # patients can select multiple races
+  # variable of all races
+  unite(c(race_26_1:race_26_7), col = "race_all", sep="; ", remove=FALSE, na.rm=TRUE) %>%
+  mutate(# count number of races selected
+    count_na = apply(.[3:10], 1, count_na_func),
+    #indicator for black race
+    race_black= !is.na(race_26_1),
+    # combined race field
+    race = case_when(
+      !is.na(race_26_other) ~ NA_character_,
+      count_na==7 ~ race_all,
+      count_na<7 ~ "More than one race",
+      TRUE ~ NA_character_)) %>%
+  rename(race_other = race_26_other) %>%
+  select(subject, race, race_black, race_all, race_other, site, 
+         site_name_short, site_country, is_metastatic_baseline, ethnicity = ethnicity_27)
+
+```
+
+## Cycle dates
+```{r}
+# baseline date
+formatted$baseline_date <- medidata$cyc_date %>%
+  filter(instance_name == "Baseline 0") %>%
+  select(subject, baseline_date = visit_date)
+
+# all cycle dates
+cycle_dates <- medidata$cyc_date %>%
+  select(subject, instance_name, visit_date)
+
+# last visit
+formatted$last_date <- medidata$cyc_date %>%
+  filter(!is.na(visit_date)) %>%
+  arrange(subject, desc(visit_date)) %>%
+  group_by(subject) %>%
+  slice(1) %>%
+  select(subject, last_visit_date = visit_date)
+
+```
+
+## Diagnosis date
+```{r}
+# Pull out fields from MHDIAGBX table
+formatted$diagnosis_data <- medidata$mhdiagbx %>%
+  select(subject, diagbx_date_int)
+
+```
+
+## Age
+```{r}
+# pull age
+formatted$dm <- medidata$dm %>%
+  select(subject, age) 
+
+```
+
+## Cohort
+```{r}
+# Pull out fields from COHORT table
+formatted$cohort_data <- medidata$cohort %>%
+  select(subject, 
+         cohort = cohort, 
+         cohort_std = cohort_std, 
+         denovomet_disease)
+
+```
+
+## Consent
+```{r}
+# Pull out fields from CONSENT table
+formatted$consent_data <- medidata$ic %>%
+  select(subject, cnstdate)
+
+
+```
+
+## TNM stage
+```{r}
+# pull TNM stage data from MHCLINSTG
+tomissing = function(x){ifelse(x=="", NA, x)}
+formatted$stg_data <- medidata$mhclinstg %>%
+  select(subject, contains("stage") & !ends_with("std")) %>%
+  mutate_at(vars(contains("stage")), tomissing) %>%
+  mutate(clinstg_tstage = coalesce(!!! select(.,contains("tstage"))),
+         clinstg_nstage = coalesce(!!! select(.,contains("nstage"))),
+         clinstg_mstage = coalesce(!!! select(.,contains("mstage")))) %>%
+  select(subject, clinstg_tstage, clinstg_nstage, clinstg_mstage)
+
+```
+
+## PSA
+```{r}
+# # pull data from PSA and HXPSA
+all_psa <- medidata$psa %>%
+  select(subject, psa, psa_date=psadt_int, instance_name) %>%
+  bind_rows(medidata$hxpsa %>%
+              select(subject, psa=hxpsaval, psa_date=hxpsadt_int) %>%
+              mutate(instance_name="Historical")) %>%
+  # replace <# to 0 and ># to #, replace comma to period
+  mutate(psa = psa,
+         # replace <# to #
+         psa = gsub("<", "", psa),
+         # replace ># to #
+         psa = str_remove(psa, ">"),
+         # replace comma to period
+         psa = gsub(",", "\\.", psa),
+         # replace double period to period
+         psa = gsub("\\.\\.", "\\.", psa),
+         # replace slash to to period
+         psa = gsub("/", "\\.", psa),
+         # replace .0. to 0.
+         psa = gsub("\\.0\\.", "0\\.", psa),
+         # remove leading character
+         psa = gsub("z", "", psa),
+         # convert to numeric
+         psa = as.numeric(psa)) %>%
+  filter(!is.na(psa)) 
+
+
+```
+
+## Baseline mets
+```{r}
+# pull mets data from CS
+formatted$mets_data <- medidata$cs %>%
+  filter(instance_name == "Baseline 0") %>%
+  select(subject,
+         csskull_std,
+         csthor_std,
+         csspine_std,
+         cspelvis_std,
+         csext_std,
+         csliver_std,
+         cslung_std,
+         csdn_std,
+         csoth_std,
+         csother2)
+
+```
+
+# Treatment data
+
+## Orchiectomy
+```{r}
+# pull orchiectomy 
+# from prior surgery table
+orch_data <- medidata$prsurg %>%
+  filter(surgtype == "Orchiectomy") %>%
+  select(subject, orch_date=prsurgdt_int) %>%
+  # from on study (baseline)
+  bind_rows(medidata$surg %>%
+              filter(surgtype == "Orchiectomy" & (instance_name %in% c("Baseline 0", "Month 3"))) %>%
+              select(subject, orch_date=surgdt)) %>%
+  mutate(orchiectomy=1) %>%
+  unique() %>%
+  # limit to mHSPC
+  inner_join(formatted$cohort_data %>% 
+               filter(cohort=="mHSPC") %>%
+               select(subject), by="subject") 
+
+```
+
+## All systemic treatments
+```{r}
+
+# all treatments
+all_treatments <- medidata$ca_cm_derived %>%
+  select(
+    subject,
+    treatment = trt_treatment_recode,
+    dt_treatment_start = exstdat_int,
+    dt_treatment_end = exendat_int,
+    treatment_category = trt_treatment_category
+  ) %>%
+  arrange(subject, dt_treatment_start)
+
+# clean treatments
+# remove non-PC drugs and filter
+clean_treatments <- all_treatments %>%
+  filter(treatment_category %notin% c("Steroid", "Antidiabetic", "Antilipemic",
+                                      "Nutraceuticals", "Bone-Modifying Agent",
+                                      "Bisphosphonates",
+                                      "Nutraceutical", "Nutraceutical/Placebo", "Placebo",
+                                      "COX-2 Inhibitor")) %>%
+  filter(!(treatment_category=="ADT" & treatment %notin% c("ADT", "Buserelin", "Degarelix",
+                                                           "Diethylstilbestrol",
+                                                           "GnRH analog", "Goserelin",
+                                                           "Histrelin",
+                                                           "Leuprolide", 
+                                                           "Leuprorelin", "Relugolix",
+                                                           "Triptorelin"))) %>%
+  # collapse consecutive or overlapping records of the same drug
+  # note: records of the same drug will get collapsed if they are back to back
+  # and missing end dates (examples: "170-01-004", "170-01-038", "170-01-044")
+  arrange(subject, dt_treatment_start, desc(dt_treatment_end), treatment) %>%
+  group_by(subject, treatment) %>%
+  mutate(
+    dt_treatment_end = if_else(is.na(dt_treatment_end), lead(dt_treatment_start), dt_treatment_end),
+    flag = if_else(dt_treatment_start <= lag(dt_treatment_end) + 1, 0, 1),
+    flag = if_else(is.na(flag), 0, flag),
+    group = cumsum(flag),
+    flag = NULL
+  ) %>% 
+  # for overlapping entries for a drug, take the earlier start date and later end date
+  group_by(subject, treatment, group) %>%
+  mutate(
+    dt_treatment_start = first(dt_treatment_start),
+    dt_treatment_end = max(dt_treatment_end)
+  ) %>% 
+  ungroup() %>% 
+  distinct(subject, treatment, dt_treatment_start, dt_treatment_end, treatment_category) %>%
+  # exclude treatments >90 days before enrollment
+  # add in consent date
+  left_join(formatted$consent_data, by="subject") %>%
+  # filter around consent date 
+  filter(dt_treatment_start - cnstdate >= -90) %>%
+  select(subject, dt_treatment_start, dt_treatment_end, treatment, treatment_category) %>%
+  # make docetaxel, carboplatin their own categories
+  mutate(treatment_category = ifelse(treatment %in% c("Docetaxel"),
+                                     treatment,
+                                     treatment_category)) 
+
+```
+
+
+## Assign LOT using treatment category
+```{r}
+
+# assign LOT while on study (treatment category) - using treatments up to 90 days before enrollment
+treatment_lot <- clean_treatments %>%
+  # handle the possibility of missing start dates with an end date
+  mutate(dt_trt_observed = coalesce(dt_treatment_start, dt_treatment_end)) %>%
+  filter(!is.na(dt_trt_observed)) %>%
+  group_by(subject) %>%
+  arrange(dt_trt_observed) %>%
+  group_modify(~ assign_lot(
+    .x, treatment_category, dt_trt_observed, dt_treatment_end
+  )) %>%
+  ungroup() %>%
+  group_by(subject, lot) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(subject, lot_on_study = lot, regimen_on_study = regimen, 
+         dt_lot_start, dt_lot_last_obs) %>%
+  # add in consent date
+  left_join(formatted$consent_data, by="subject") %>%
+  mutate(enroll_tmt = as.numeric((as.Date(cnstdate, format = "%Y-%m-%d", origin="1970-01-01") %--%
+                                       as.Date(dt_lot_start, format = "%Y-%m-%d")) / months(1))) 
+
+# assign LOT while on study (drug name) - using treatments up to 90 days before enrollment
+treatment_lot_drug <- clean_treatments %>%
+  # handle the possibility of missing start dates with an end date
+  mutate(dt_trt_observed = coalesce(dt_treatment_start, dt_treatment_end),
+         treatment = ifelse(treatment_category=="ADT", "ADT", treatment)) %>%
+  filter(!is.na(dt_trt_observed)) %>%
+  group_by(subject) %>%
+  arrange(dt_trt_observed, treatment) %>%
+  group_modify(~ assign_lot(
+    .x, treatment, dt_trt_observed, dt_treatment_end
+  )) %>%
+  ungroup() %>%
+  group_by(subject, lot) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(subject, lot_on_study = lot, treatment_on_study = regimen, 
+         dt_lot_start, dt_lot_last_obs)  
+
+# categorize treatment regimens 
+treatment <- treatment_lot %>%
+  left_join(orch_data, by="subject") %>%
+  mutate(tmt_regimen = case_when(
+    # ADT + ARPI + docetaxel
+    regimen_on_study %in% c("ADT, AR Signaling Inhibitor, Docetaxel", 
+                            "AR Signaling Inhibitor, Docetaxel") ~ 4,
+    # ADT + ARPI
+    regimen_on_study %in% c("ADT, AR Signaling Inhibitor", 
+                            "AR Signaling Inhibitor") ~ 3,
+    # ADT + docetaxel
+    regimen_on_study %in% c("ADT, Docetaxel", 
+                            "Docetaxel") ~ 2,
+    # ADT monotherapy
+    regimen_on_study=="ADT" | orchiectomy==1 ~ 0,
+    # other 
+    TRUE ~ 5),
+    tmt_regimen = factor(tmt_regimen, 
+                            levels = c(0,2,3,4,5), 
+                            labels = c("ADT monotherapy", 
+                                       "ADT + docetaxel",
+                                       "ADT + ARPI",
+                                       "ADT + ARPI + docetaxel",
+                                       "Other")),
+   adt = ifelse(grepl("ADT", regimen_on_study) | orchiectomy==1, 1, NA)) 
+
+
+# incorporate treatment intensification within 3 months - any treatment added to ADT
+# add in possibility that ADT, docetaxel, and ARPI are in 3 separate regimens
+formatted$treatment_pivot <- treatment %>% 
+  # made data wide
+  filter(lot_on_study %in% 1:3) %>% 
+  select(subject, 
+         lot_on_study, 
+         regimen_on_study, 
+         enroll_tmt, 
+         tmt_regimen, 
+         dt_lot_start, 
+         dt_lot_last_obs) %>% 
+  pivot_wider(names_from = lot_on_study, 
+              values_from = c(regimen_on_study, 
+                              enroll_tmt, 
+                              tmt_regimen, 
+                              dt_lot_start, 
+                              dt_lot_last_obs),
+              names_sep="") %>%
+  # merge in end date of ARSI for first LOT ADT+ARSI or end date of doce for ADT+doce
+  left_join(clean_treatments %>% 
+              right_join(treatment %>%
+                           filter(lot_on_study==1 & 
+                                    tmt_regimen %in% c("ADT + ARPI", 
+                                                          "ADT + docetaxel")),
+                         by="subject") %>%
+              filter((tmt_regimen=="ADT + ARPI" & 
+                        treatment_category=="AR Signaling Inhibitor") | 
+                       (tmt_regimen=="ADT + docetaxel" & 
+                          treatment_category=="Docetaxel")) %>%
+              group_by(subject) %>%
+              slice(1) %>%
+              select(subject, first_drug_end_date = dt_treatment_end),
+            by="subject") %>%
+  # categorize treatments
+  mutate(# second regimen is within 3 months of first
+         within3mo = ifelse(enroll_tmt2-enroll_tmt1<=3, 1, 0),
+         # third regimen is within 3 months of second and 
+         # third lot starts before second lot ends or 
+         # end date of second lot is missing
+         within3mo_3r = ifelse(enroll_tmt3-enroll_tmt2<=3 & 
+                  (dt_lot_last_obs2 > dt_lot_start3 | 
+                     dt_lot_start2==dt_lot_last_obs2), 1, 0),
+         tmt_regimen = case_when(
+           # ADT + ARPI + docetaxel
+           tmt_regimen1=="ADT + ARPI + docetaxel" | 
+             # in 3 separate regimens
+             (tmt_regimen1=="ADT monotherapy" &
+                (tmt_regimen2=="ADT + docetaxel" & 
+                tmt_regimen3=="ADT + ARPI" &
+                within3mo_3r==1) | 
+                (tmt_regimen2=="ADT + ARPI" & 
+                tmt_regimen3=="ADT + docetaxel" &
+                within3mo_3r==1)) |
+             # ARPI and docetaxel added in second regimen
+             (tmt_regimen1=="ADT monotherapy" & 
+                tmt_regimen2=="ADT + ARPI + docetaxel" &
+                within3mo==1) |
+             # docetaxel added to ARPI
+             (tmt_regimen1=="ADT + ARPI" & 
+                tmt_regimen2=="ADT + docetaxel" &
+                within3mo==1 &
+                (dt_lot_start2 < first_drug_end_date | is.na(first_drug_end_date))) |
+             # ARPI added to docetaxel
+             (tmt_regimen1=="ADT + docetaxel" & 
+                tmt_regimen2=="ADT + ARPI" &
+                within3mo==1 &
+                (dt_lot_start2 < first_drug_end_date | is.na(first_drug_end_date))) ~ 4,
+           # ADT + ARPI
+           tmt_regimen1=="ADT + ARPI" | 
+             (tmt_regimen1=="ADT monotherapy" & 
+                tmt_regimen2=="ADT + ARPI" &
+                within3mo==1) ~ 3,
+           # ADT + docetaxel
+           tmt_regimen1=="ADT + docetaxel" | 
+             (tmt_regimen1=="ADT monotherapy" & 
+                tmt_regimen2=="ADT + docetaxel" &
+                within3mo==1) ~ 2,
+           # Other
+           tmt_regimen1=="ADT monotherapy" & 
+             tmt_regimen2=="Other" &
+                within3mo==1 ~ 5,
+           # ADT monotherapy
+           tmt_regimen1=="ADT monotherapy" ~ 0,
+           # other 
+           TRUE ~ 5),
+         tmt_regimen = factor(tmt_regimen, 
+                                 levels = c(0,2,3,4,5), 
+                                 labels = c("ADT monotherapy", 
+                                            "ADT + docetaxel",
+                                            "ADT + ARPI",
+                                            "ADT + ARPI + docetaxel",
+                                            "Other")),
+         adt = ifelse(grepl("ADT", regimen_on_study1), 1, NA)) %>%
+  # flag for whether treatment was updated based on intensification within 3 mo
+  mutate(treatment_updated = case_when(
+    tmt_regimen1==tmt_regimen ~ 0,
+    (tmt_regimen1=="ADT monotherapy" &
+                (tmt_regimen2=="ADT + docetaxel" & 
+                tmt_regimen3=="ADT + ARPI" &
+                within3mo_3r==1) | 
+                (tmt_regimen2=="ADT + ARPI" & 
+                tmt_regimen3=="ADT + docetaxel" &
+                within3mo_3r==1)) ~ 2,
+    tmt_regimen1!=tmt_regimen ~ 1 )) %>%
+  select(-within3mo, -within3mo_3r, -first_drug_end_date)
+
+
+# # first and second treatment tabulation
+# table(treatment_pivot$tmt_regimen1, treatment_pivot$tmt_regimen2, useNA="ifany")
+# table(treatment_pivot$tmt_regimen1, treatment_pivot$tmt_regimen, useNA="ifany")
+
+# first and second treatment LOT 
+# this is more specific than "treatment change" which only considers a change of category
+formatted$first_lot <- treatment_lot_drug %>%
+  left_join(formatted$treatment_pivot, by="subject") %>%
+  # keep records in first LOT
+  filter(lot_on_study <= treatment_updated + 1) %>%
+  group_by(subject) %>%
+  # collapse drugs in the same treatment into one variable
+  arrange(subject, treatment_on_study) %>%
+  summarise(drugs_first_lot = paste(treatment_on_study, collapse = ", ")) %>%
+  mutate(drugs_first_lot = gsub("ADT, ADT", "ADT", drugs_first_lot),
+         drugs_first_lot = gsub("ADT, ", "", drugs_first_lot))
+formatted$second_lot <- treatment_lot_drug %>%
+  left_join(formatted$treatment_pivot, by="subject") %>%
+  # keep records after first LOT
+  filter(lot_on_study > treatment_updated + 1) %>%
+  # drop ADT only records 
+  filter(treatment_on_study!="ADT") %>%
+  # keep first record per patient
+  arrange(subject, lot_on_study) %>%
+  group_by(subject) %>%
+  slice(1) %>%
+  mutate(drugs_second_lot = gsub("ADT, ", "", treatment_on_study)) %>%
+  select(subject, drugs_second_lot)
+
+```
+
+
+## Radical prostatectomy (RP)
+```{r}
+# pull data from RP_PRMI
+formatted$rp2_data <- medidata$rp_prmi %>%
+  select(subject, rp_date=prstdat_int) %>%
+  mutate(rp=1) %>%
+  unique()
+
+# pull RP status from RPPROS
+formatted$rp_prestudy <- medidata$prpros %>%
+  select(subject, rp_date2=prprosdt_int) %>%
+  mutate(prior_rp=1) 
+# Note: on-study prostate date pulled above in rp2_data
+
+```
+
+## Pre-Study Radiation (XRT)
+```{r}
+# pull radiation from PTRADIATION
+formatted$radiation_data <- medidata$ptradiation %>%
+  select(subject, radreg, radreg_std, radregt, radregt_std, radregdt_int) %>%
+  filter(radregt != "Palliative") %>%
+  arrange(subject, radregdt_int) %>%
+  group_by(subject) %>%
+  slice(1) %>% 
+  ungroup() %>%
+  mutate(prior_xrt=1)
+
+```
+
+## ADT for localized disease
+```{r}
+formatted$primary_adt <- all_treatments %>%
+  filter(treatment_category=="ADT") %>%
+  filter(treatment %in% c("ADT", "Buserelin", "Degarelix",
+                          "Diethylstilbestrol",
+                          "GnRH analog", "Goserelin",
+                          "Histrelin",
+                          "Leuprolide", 
+                          "Leuprorelin", "Relugolix",
+                          "Triptorelin")) %>%
+  # exclude treatments >90 days before enrollment
+  # add in consent date
+  left_join(formatted$consent_data, by="subject") %>%
+  # join in baseline metastatic date
+  left_join(medidata$subject %>% select(subject, date_metastatic_baseline), by="subject") %>%
+  # filter around consent date and first mets date
+  mutate(adt_to_consent = cnstdate %--% dt_treatment_start / months(1)) %>%
+  filter(adt_to_consent < -3 & 
+           (dt_treatment_start<date_metastatic_baseline | is.na(date_metastatic_baseline))) %>%
+  arrange(subject, dt_treatment_start) %>%
+  group_by(subject) %>%
+  slice(1) %>%
+  mutate(primary_adt = ifelse(adt_to_consent< -12, 1, 0),
+         primary_adt_date = as.Date(ifelse(primary_adt==1, dt_treatment_start, NA), 
+                                    format = "%Y-%m-%d", 
+                                    origin="1970-01-01")) %>%
+  select(subject, primary_adt, primary_adt_date, adt_to_consent)
+
+
+```
+
+
+# Outcomes
+
+## Death
+```{r}
+formatted$death_data <- medidata$pstatus %>%
+  select(subject, deathdate_int, cod_std) %>%
+  mutate(dead=1)
+
+```
+
+
+## Date of treatment change
+```{r}
+# date of second lot for patients who did not have treatment update
+# date of third lot for patients with treatment updated (intensification w/in 3 mo)
+# date of fourth lot for patients with ADT, abi, and doce in separate regimens
+# must confirm that treatment changes
+formatted$tmt_change <- treatment %>%
+  # merge in final treatment
+  right_join(formatted$treatment_pivot %>% 
+               select(subject, treatment_updated,  
+                      final_tmt_regimen = tmt_regimen),
+             by="subject") %>%
+  # only keep treatments after 
+  filter((lot_on_study>=2 & treatment_updated==0) | 
+           (lot_on_study>=3 & treatment_updated==1) |
+           (lot_on_study>=4 & treatment_updated==2)) %>%
+  # make treatments numeric for easier coding
+  mutate(n_regimen = as.numeric(tmt_regimen),
+         n_regimenf = as.numeric(final_tmt_regimen)) %>%
+  # only select patients who moved to a different/more intense regimen
+  filter((n_regimenf==1 & n_regimen %in% c(2,3,4,5)) |
+           (n_regimenf==2 & n_regimen %in% c(3,4,5)) |
+           (n_regimenf==3 & n_regimen %in% c(2,4,5)) |
+           (n_regimenf==4 & n_regimen==5)) %>%
+  # first record per patient
+  group_by(subject) %>%
+  slice(1) %>%
+  select(subject, treatment_change_date = dt_lot_start, 
+         treatment_change_drug = regimen_on_study)
+
+# second lot
+# date of second lot for patients who did not have treatment update
+# date of third lot for patients with treatment updated (intensification w/in 3 mo)
+# date of fourth lot for patients with ADT, abi, and doce in separate regimens
+# can be same treatment (want to know second LOT)
+formatted$tmt_change2 <- treatment %>%
+  # merge in final treatment
+  right_join(formatted$treatment_pivot %>% 
+               select(subject, treatment_updated,  
+                      final_tmt_regimen = tmt_regimen),
+             by="subject") %>%
+  # only keep treatments after 
+  filter((lot_on_study>=2 & treatment_updated==0) | 
+           (lot_on_study>=3 & treatment_updated==1) |
+           (lot_on_study>=4 & treatment_updated==2)) %>%
+  # first record per patient
+  group_by(subject) %>%
+  slice(1) %>%
+  select(subject, any_treatment_change_date = dt_lot_start, 
+         any_treatment_change_drug = regimen_on_study)
+  
+```
+
+
+## PSA calculations
+```{r}
+
+# pre-treatment psa - must be within 90 days before treatment
+formatted$psa_data <- all_psa %>%
+  # merge in enrollment date
+  inner_join(formatted$treatment_pivot, by="subject") %>% 
+  # PSA closest to treatment start
+  mutate(timetopsa = as.Date(dt_lot_start1, format = "%Y-%m-%d", origin="1970-01-01") %--%
+                           as.Date(psa_date, format = "%Y-%m-%d") / days(1)) %>%
+  filter(timetopsa<=0 & timetopsa>=-90) %>%
+  #testing first PSA timing
+  select(subject, instance_name, psa_date, psa, timetopsa) %>%
+  arrange(subject, timetopsa) %>%
+  group_by(subject) %>%
+  slice(1) %>%
+  # note: all units are ng/mL or ug/L which are equivalent
+  select(subject, pre_tmt_psa=psa, pre_tmt_psa_date=psa_date) 
+
+
+# PSA nadir
+formatted$psa_nadir <- all_psa %>%
+  # keep PSAs after baseline PSA/T0
+  left_join(formatted$psa_data, by="subject") %>%
+  filter(psa_date>pre_tmt_psa_date) %>%
+  # keep PSAs before second treatment regimen
+  left_join(formatted$tmt_change, by="subject") %>%
+  filter(psa_date<treatment_change_date | is.na(treatment_change_date)) %>%
+  # find value and date of psa nadir
+  group_by(subject) %>%
+  mutate(psa_nadir = min(psa),
+         temp = ifelse(psa==psa_nadir, psa_date, NA),
+         psa_nadir_date = as.Date(min(temp, na.rm=TRUE), format = "%Y-%m-%d", origin = "1970-01-01")) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(subject, psa_nadir, psa_nadir_date)
+
+
+```
+
+## Lowest PSA within 6 mo
+```{r}
+# create fields for any PSA within 6 months of treatment start and
+# undetectable PSA within 6 months of treatment start (y/n)
+# must be before switching treatments
+formatted$psa6mo <- all_psa %>%
+  # keep PSAs within 6 mo after baseline PSA
+  left_join(formatted$psa_data, by="subject") %>%
+  mutate(timetopsa = time_length(psa_date - pre_tmt_psa_date, unit = "month")) %>%
+  filter(timetopsa>0 & timetopsa<=6) %>%
+  # # keep PSAs before second treatment regimen
+  left_join(formatted$tmt_change, by="subject") %>%
+  filter(psa_date<treatment_change_date | is.na(treatment_change_date)) %>%
+  # select lowest PSA
+  arrange(subject, psa, psa_date) %>% 
+  group_by(subject) %>% 
+  slice(1) %>% 
+  # categorize PSA
+  mutate(psa_nadir6gp = cut(psa, 
+                            breaks = c(0, 0.02, 0.2, 1000000), 
+                            labels = c("<0.02", "0.02-0.2", ">0.2"))) %>% 
+  select(subject, psa_nadir6 = psa, psa_nadir6gp)
+
+
+
+```
+
+
+## Lowest PSA within 12 mo
+```{r}
+# create fields for any PSA within 12 months of treatment start and
+# undetectable PSA within 12 months of treatment start (y/n)
+# must be before switching treatments
+formatted$psa12mo <- all_psa %>%
+  # keep PSAs within 12 mo after baseline PSA
+  left_join(formatted$psa_data, by="subject") %>%
+  mutate(timetopsa = time_length(psa_date - pre_tmt_psa_date, unit = "month")) %>%
+  filter(timetopsa>0 & timetopsa<=12) %>%
+  # keep PSAs before second treatment regimen
+  left_join(formatted$tmt_change, by="subject") %>%
+  filter(psa_date<treatment_change_date | is.na(treatment_change_date)) %>%
+  # select lowest PSA
+  arrange(subject, psa, psa_date) %>% 
+  group_by(subject) %>% 
+  slice(1) %>% 
+  # categorize PSA
+  mutate(psa_nadir12gp = cut(psa, 
+                            breaks = c(0, 0.02, 0.2, 1000000), 
+                            labels = c("<0.02", "0.02-0.2", ">0.2"))) %>% 
+  select(subject, psa_nadir12 = psa, psa_nadir12gp)
+
+
+```
+
+
+## Censor date
+```{r}
+# last of: PSA date, treatment date (start or end), 
+formatted$censor_date <- all_psa %>%
+  # last PSA date
+  arrange(subject, desc(psa_date)) %>%
+  group_by(subject) %>%
+  slice(1) %>%
+  select(subject, psa_date) %>%
+  # merge in last treatment start date
+  right_join(all_treatments %>%
+               arrange(subject, desc(dt_treatment_start)) %>%
+               group_by(subject) %>%
+               slice(1) %>%
+               select(subject, dt_treatment_start), by="subject") %>%
+  # merge in last treatment end date
+  left_join(all_treatments %>%
+               arrange(subject, desc(dt_treatment_end)) %>%
+               group_by(subject) %>%
+               slice(1) %>%
+               select(subject, dt_treatment_end), by="subject") %>%
+  # find last date
+  rowwise() %>%
+  mutate(censor_date = pmax(psa_date, dt_treatment_start, dt_treatment_end, na.rm = TRUE)) %>%
+  ungroup() %>%
+  select(subject, censor_date)
+
+ 
+```
+
+
+# Format data
+
+## Merge all datasets
+```{r}
+all_data = Reduce(function(...) merge(..., by="subject", all=T), formatted) 
+
+```
+
+
+## Create new variables
+```{r}
+all_data2 <- all_data %>%
+  mutate(
+    year = factor(year(dt_lot_start1)),
+    year_consent = factor(year(cnstdate)),
+    adt = replace_na(adt, 0),
+    
+    # T-stage
+    t_stage = case_when(
+      clinstg_tstage=="T0" ~ 0,
+      clinstg_tstage %in% c("T1", "T1a", "T1b", "T1c") ~ 1,
+      clinstg_tstage %in% c("T2", "T2a", "T2b", "T2c") ~ 2,
+      clinstg_tstage %in% c("T3", "T3a", "T3b", "T3c") ~ 3,
+      clinstg_tstage %in% c("T4", "T4a", "T4b")  ~ 4,
+      clinstg_tstage %in% c("TX", "Unk", NA) ~ NA_real_),
+    
+    # N-stage
+    n_stage = case_when(
+      clinstg_nstage == "N0" ~ 0,
+      clinstg_nstage == "N1" ~ 1,
+      clinstg_nstage == "N2" ~ 2,
+      clinstg_nstage == "N3" ~ 3,
+      clinstg_nstage %in% c("NX", "Unk", NA) ~ NA_real_),
+    
+    # M-stage
+    m_stage = case_when(
+      clinstg_mstage == "M0" ~ 0,
+      clinstg_mstage %in% c("M1", "M1a", "M1b", "M1c") ~ 1,
+      clinstg_mstage %in% c("MX", "Unk", NA) ~ NA_real_),
+    
+    # site of metastases (database)
+    # clean up other mets
+    csother2 = tolower(csother2),
+    csother2 = ifelse(csother2 %in% c("n/a", 
+                                      "no", 
+                                      "nothing",
+                                      "no evidence of metastases", 
+                                      "none reported", 
+                                      "none reported at this time", 
+                                      "no other", 
+                                      "NA"),
+                      NA, csother2),
+    csoth_std = ifelse(csother2 %in% c("n/a", 
+                                       "no", 
+                                       "nothing",
+                                       "no evidence of metastases", 
+                                       "none reported", 
+                                       "none reported at this time", 
+                                       "no other", 
+                                       "NA"), 
+                       0, csoth_std),
+    met_other_bone = ifelse(((grepl(
+      c("rib|bone|scapula|skelet|cervical|bony|femur|femor|oss|osteo|clavic|sacrum|superscan|acromion|acetabular|crest|glenoid|hip|humerus|glenoid|tuberosity|joint|mandible|pubic|acetabulum|acromion|shoulder|sternum") ,
+      csother2) 
+      & !grepl(c("supraclavical|possible"), 
+               csother2)) | 
+        csother2=="sacral ala") & 
+        csother2!="left common femoral lymphadenopathy", 1, 0),
+    met_other_lymph = ifelse((grepl(c("lymph|node|ln|nodal|nodus|inter|para|supra|retro|pleur|para|external|wall|pathy|chain|meso"), csother2) & 
+                                !grepl(c("intermittent|crest|rectal wall|paravertebral"), csother2)) | 
+                               csother2=="rectum", 1, 0),
+    met_other_visceral = ifelse(grepl(c("visc|adrenal|penis|hepa|fat|spleen|liver|spleen|uretal|effusion|ureteral"), csother2) | csother2 %in% c("peritoneal", "peritoneal metastasis", "peritoneum"), 1, 0),
+    met_other_other = ifelse(!is.na(csother2) & met_other_bone==0 & met_other_lymph==0 &
+                               met_other_visceral==0, 1, 0),
+    
+    # individual metastasis sites
+    met_bone = case_when(
+      csskull_std==0 & csthor_std==0 & csspine_std==0 & cspelvis_std==0 & 
+        csext_std==0 & met_other_bone==0 ~ 0,            
+      csskull_std==1 | csthor_std==1 | csspine_std==1 | cspelvis_std==1 | 
+        csext_std==1 | met_other_bone==1 ~ 1,
+      TRUE ~ 99),
+    met_lymph = case_when(
+      csdn_std==0 & met_other_lymph==0 ~ 0,
+      csdn_std==1 | met_other_lymph==1 ~ 1,
+      TRUE ~ 99),
+    met_visceral = case_when(
+      csliver_std==0 & cslung_std==0 & met_other_visceral==0 ~ 0,
+      csliver_std==1 | cslung_std==1 | met_other_visceral==1 ~ 1,
+      TRUE ~ 99),
+    met_other = case_when(
+      met_other_other==0 ~ 0,
+      met_other_other==1 ~ 1,
+      is.na(met_other_other) ~ 99),
+    met_none = ifelse(met_bone %in% c(0,99) & 
+                        met_lymph %in% c(0,99) & 
+                        met_visceral %in% c(0,99) &
+                        met_other %in% c(0,99), 1, 0),
+    met_combo = case_when(
+      is_metastatic_baseline==0 ~ 0, # none according to metastatic flag
+      met_bone==1 & met_lymph %in% c(0,99) & met_visceral %in% c(0,99)  ~ 1, # bone only
+      met_bone %in% c(0,99) & met_lymph==1 & met_visceral %in% c(0,99)  ~ 2, # lymph only
+      met_bone %in% c(0,99) & met_lymph %in% c(0,99) & met_visceral==1  ~ 3, # visceral only
+      met_bone==1 & met_lymph==1 & met_visceral %in% c(0,99) ~ 5, # bone + lymph
+      met_bone==1 & met_lymph %in% c(0,99) & met_visceral==1 ~ 6, # bone + visceral
+      met_bone %in% c(0,99) & met_lymph==1 & met_visceral==1 ~ 7, # lymph + visceral
+      met_bone==1 & met_lymph==1 & met_visceral==1 ~ 8, # bone + lymph + visceral
+      met_other==1 ~ 9, # other 
+      TRUE ~ 99 # unknown
+    ),
+    
+    # metastasis - 4 categories 
+    met_combo4 = case_when(
+      is_metastatic_baseline==0 ~ 0, # no mets
+      met_visceral==1 ~ 4, # any visceral 
+      met_bone==1 & met_lymph==1 ~ 3, # bone and lymph node
+      met_bone==1 ~ 1, # bone only
+      met_lymph==1 ~ 2, # lymph only
+      met_other==1 ~ 5, # other
+      TRUE ~ 6), # unknown
+    
+    # Had localized treatment (RP or XRT)
+    prior_rp = ifelse(prior_rp==1 | rp_date<dt_lot_start1, 1, 0),
+    rp_xrt = ifelse(prior_rp==1 | prior_xrt==1, 1, 0), 
+    
+    # time to PSA nadir
+    ttn = time_length(psa_nadir_date - dt_lot_start1, unit = "month"), 
+    
+    # new censor date
+    new_censor_date = as.Date(case_when(dt_lot_start1==censor_date ~  
+                                  pmax(last_visit_date, censor_date, na.rm=TRUE), 
+                                TRUE ~ censor_date),
+                              format = "%Y-%m-%d", origin="1970-01-01"),
+    
+    # death
+    dead = ifelse(is.na(dead), 0, 1),
+    limbo = ifelse(dead==1, time_length(deathdate_int - dt_lot_start1, unit = "month"), 
+                   time_length(new_censor_date - dt_lot_start1, unit = "month")),
+    
+    # diagnosis to treatment start
+    diag_tmt_start = time_length(dt_lot_start1 - diagbx_date_int, unit = "month")
+  )
+
+```
+
+## Variable labels
+```{r}
+# variable labels
+ynlev = c(0,1,99)
+ynlab = c("No", "Yes", "Unknown")
+ynlev2 = c(0,1)
+ynlab2 = c("No", "Yes")
+
+all_data2 <- all_data2 %>%
+  mutate(
+    cohort_std = factor(cohort_std,
+                           levels=c(1,2),
+                           labels=c("mHSPC","CRPC")),
+    # country ordered in terms of frequency - most to least frequent
+    race = fct_infreq(race, ordered = TRUE),
+    racegp = fct_lump_prop(race, 0.005),
+    racegp = factor(racegp, levels = c("white / caucasian",
+                                       "african / african american / black / black british / caribbean",
+                                       "asian / asian american / asian british",
+                                       "More than one race",
+                                       "Other"),
+                    labels = c("White", 
+                               "Black", 
+                               "Asian", 
+                               "More than one race", 
+                               "A race not listed")),
+    ethnicity = factor(ethnicity),
+    t_stage = factor(t_stage,
+                     c(0, 1,2,3,4),
+                     c("T0", "T1", "T2", "T3", "T4")),
+    m_stage = factor(m_stage,
+                     c(0,1),
+                     c("M0", "M1")),
+    n_stage = factor(n_stage,
+                     c(0,1,2,3),
+                     c("N0", "N1", "N2", "N3")),
+    met_combo = factor(met_combo,
+                          levels=c(0,1,2,3,5,6,7,8,9,99),
+                          labels=c("None reported",
+                                   "Bone only",
+                                   "Lymph node only",
+                                   "Visceral only" ,
+                                   "Bone, lymph node",
+                                   "Bone, visceral",
+                                   "Lymph node, visceral",
+                                   "Bone, lymph node, visceral",
+                                   "Other",
+                                   "Unknown")),
+    met_combo4 = factor(met_combo4,
+                           levels=c(0,1,2,3,4,5,6),
+                           labels=c("Unknown",
+                                    "Bone only",
+                                    "Lymph node only",
+                                    "Bone and lymph node" ,
+                                    "Any visceral",
+                                    "Other",
+                                    "Unknown")),
+    met_bone = factor(met_bone, levels=ynlev, labels=ynlab),
+    met_lymph = factor(met_lymph, levels=ynlev, labels=ynlab),
+    met_visceral = factor(met_visceral, levels=ynlev, labels=ynlab),
+    met_other = factor(met_other, levels=ynlev, labels=ynlab),
+    met_none = factor(met_none, levels=ynlev, labels=ynlab),
+    adt = factor(adt, levels=ynlev2, labels=ynlab2),
+    is_metastatic_baseline = factor(is_metastatic_baseline, levels=ynlev2, labels=ynlab2),
+    treatment_updated = factor(treatment_updated, levels=0:2, 
+                               labels=c("No", 
+                                        "Yes, intensified in 2 regimens",
+                                        "Yes, intensified in 3 regimens")),
+    rp = factor(is_metastatic_baseline, levels=ynlev2, labels=ynlab2),
+    prior_rp = factor(prior_rp, levels=ynlev2, labels=ynlab2),
+    prior_xrt = factor(prior_xrt, levels=ynlev2, labels=ynlab2),           
+    primary_adt = ifelse(is.na(primary_adt), 0, primary_adt),
+    primary_adt = factor(primary_adt, levels=ynlev2, labels=ynlab2),           
+    rp_xrt = ifelse(is.na(rp_xrt), 0, 1),
+    rp_xrt = factor(rp_xrt, levels=ynlev2, labels=ynlab2),   
+    dead = factor(dead, levels=ynlev2, labels=ynlab2))
+
+# label variables
+var_label(all_data2) <- list(
+  site_country = "Country",
+  year_consent = "Year of consent",
+  year = "Year of treatment start",
+  cohort_std = "Disease status",
+  cohort = "Disease status",
+  race = "Race",
+  race_black = "Black race",
+  race_all = "All races selected",
+  racegp = "Race",
+  race_other = "Other race",
+  site = "Site",
+  ethnicity = "Hispanic/Latino",
+  age = "Age at enrollment",
+  t_stage = "T stage at diagnosis",
+  n_stage = "N stage at diagnosis",
+  m_stage = "M stage at diagnosis",
+  is_metastatic_baseline = "Any metastases reported",
+  met_combo = "Site of metastases (subjects only counted once)",
+  met_combo4 = "Site of metastases",
+  met_bone = "Bone metastasis",
+  met_lymph = "Lymph node metastasis",
+  met_visceral = "Visceral metastasis",
+  met_other = "Other site metastasis",
+  met_none = "No metastases reported",
+  adt = "ADT listed in records",
+  tmt_regimen = "First treatment regimen",
+  site_name_short = "Site",
+  is_metastatic_baseline = "Metastatic at baseline",
+  baseline_date = "Date of baseline visit",
+  diagbx_date_int = "Date of PC diagnosis",
+  cnstdate = "Date of consent",
+  regimen_on_study1 = "First regimen on study",
+  enroll_tmt1 = "Time from enrollment to first regimen",          
+  tmt_regimen1 = "First regimen on study - categorized",
+  dt_lot_start1 = "Start date of first regimen",
+  dt_lot_last_obs1 = "End date of first regimen",
+  regimen_on_study2 = "Second regimen on study",
+  enroll_tmt2 = "Time from enrollment to second regimen",          
+  tmt_regimen2 = "Second regimen on study - categorized",
+  dt_lot_start2 = "Start date of second regimen",
+  dt_lot_last_obs2 = "End date of second regimen",
+  regimen_on_study3 = "Third regimen on study",
+  enroll_tmt3 = "Time from enrollment to third regimen",          
+  tmt_regimen3 = "Third regimen on study - categorized",
+  dt_lot_start3 = "Start date of third regimen",
+  dt_lot_last_obs3 = "End date of third regimen",
+  tmt_regimen = "Primary treatment regimen",
+  treatment_updated = "Was primary treatment updated with intensification w/in 3 mo?",
+  rp_date = "Date of pre-study RP",            
+  rp = "On study RP",
+  rp_date2 = "Date of on-study RP",
+  prior_rp = "Prior RP",
+  radreg = "Radiation regimen (prior)",
+  radreg_std = "Radiation regimen (prior)",           
+  radregt = "Radiation regimen type (prior)",             
+  radregt_std = "Radiation regimen type (prior)",    
+  radregdt_int = "Radiation start date (prior)", 
+  prior_xrt = "Prior radiation",
+  treatment_change_date = "Date of treatment change",
+  pre_tmt_psa = "PSA before treatment start",
+  pre_tmt_psa_date = "Date of PSA before treatment start",
+  psa_nadir = "PSA nadir",
+  psa_nadir_date = "Date of PSA nadir",
+  psa_nadir6 = "PSA nadir within 6 months",
+  psa_nadir6gp = "PSA nadir within 6 months",
+  psa_nadir12 = "PSA nadir within 12 months",
+  psa_nadir12gp = "PSA nadir within 12 months",
+  
+  censor_date = "Censor date",   
+  primary_adt = "Primary ADT",  
+  primary_adt_date = "Date of primary ADT",
+  rp_xrt = "Primary RP or XRT",       
+  diag_tmt_start = "Months from diagnosis to treatment start",
+  denovomet_disease = "De novo metastasis",
+  adt_to_consent = "Months from ADT start to consent date",
+  treatment_change_drug = "Drug regimen at treatment change",
+  any_treatment_change_drug = "Drug regimen at treatment change",
+  any_treatment_change_date = "Treatment change date",
+  drugs_first_lot = "Drugs in the first LOT",
+  drugs_second_lot = "Drugs in the second LOT"
+)
+
+```
+
+## Save data
+```{r}
+##Save the result for analysis 
+today_rec <- format(Sys.Date(), format="%Y%m%d")
+savfile<-here::here("data", paste0("ironman_psa0.2_", today_rec, ".RData"))
+save(all_data2, all_psa, file= savfile)
+Sys.time()
+
+```

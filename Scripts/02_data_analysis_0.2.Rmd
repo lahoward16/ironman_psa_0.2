@@ -1,0 +1,94 @@
+---
+title: 'IRONMAN: PSA <0.2 ng/ml after ARPI'
+author: "Lauren Howard & Kerri-Anne Crowell"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r, echo =FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      warning=FALSE, 
+                      message=FALSE, 
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.show='hold',
+                      size='footnotesize',
+                      fig.width=10,
+                      fig.height=6)
+```
+
+
+```{r}
+# load packages
+library(readxl)
+library(tidyverse)
+library(lubridate)
+library(here)
+library(dplyr)
+library(labelled)
+library(writexl)
+library(DT)
+library(gtsummary)
+library(gtsurvfit)
+library(consort)
+
+```
+
+```{r}
+# Read data
+load(here("data", paste0("ironman_psa0.2_20250404.RData")))
+     
+```
+
+# Consort diagram
+```{r}
+consort_data <- all_data2 %>% 
+  mutate(exclusion1 = case_when(
+    cohort_std=="CRPC" ~ "CRPC",
+    is.na(cohort_std) ~ "Missing disease state",
+    TRUE ~ NA),
+    exclusion2 = case_when(
+      cohort_std=="CRPC" ~ NA,
+      tmt_regimen=="ADT monotherapy" ~ "ADT monotherapy",
+      tmt_regimen=="ADT + docetaxel" ~ "ADT + docetaxel",
+      tmt_regimen=="Other" ~ "Other treatment",
+      is.na(tmt_regimen) ~ "Missing treatment information", 
+      grepl("ARPI", tmt_regimen) & adt=="No" ~ "ARPI but no documented ADT"),
+    exclusion3 = case_when(
+      is.na(pre_tmt_psa) ~ "Missing pre-treatment PSA",
+      is.na(psa_nadir6) ~ "Missing follow-up PSA"
+    ))
+ 
+out <- consort_plot(data = consort_data,
+                    orders = c(subject = "IRONMAN cohort",
+                               exclusion1 = "Exclude",
+                               subject = "mHSPC",
+                               exclusion2 = "Exclude treatments",
+                               subject = "Treated with documented ADT + ARPI",
+                               exclusion3 = "Exclude missing PSA",
+                               subject = "Study cohort"),
+                    side_box = c("exclusion1", "exclusion2", "exclusion3"),
+                    cex = 0.9)
+plot(out)
+ 
+```
+
+
+```{r}
+mydata <- consort_data %>% 
+  # filter(is.na(exclusion1) & is.na(exclusion2))
+  filter(cohort_std=="mHSPC" & grepl("ARPI", tmt_regimen))
+
+load(here("data", "soum_cohort.rdata"))
+
+length(intersect(mydata$subject, cohort2$subject)) # 1083 /1375
+# Only in mine
+setdiff(mydata$subject, cohort2$subject) # 74 / 106
+# Only in Soum's
+setdiff(cohort2$subject, mydata$subject) # 318 / 26
+
+```
+
+
+
+

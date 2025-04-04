@@ -44,7 +44,8 @@ library(ironer)
 
 ```{r data}
 
-load("~/Documents/IRONMAN/2024-09-23_ironman.RData")
+# load("~/Documents/IRONMAN/2024-09-23_ironman.RData")
+load("V:/IRONMAN/2024-11-04/2024-11-04_ironman.Rdata")
 
 ###########################################################
 cohort <- medidata$cohort%>%
@@ -385,6 +386,7 @@ cohort2 <- merge(cohort2, follow_up, by = "subject")
 
 ## Calculating OS from treatment start date
 cohort2.1 <- cohort2%>%
+  left_join(medidata$pstatus %>% select(subject, deathdate), by = "subject") %>% 
   mutate(OS_date = pmin(date_lfu, deathdate, na.rm = T),
          OS = as.duration(dt_lot_start%--%OS_date)/dmonths(1),
          PCSM = as.factor(ifelse(Dead==0,"Alive",
@@ -487,6 +489,12 @@ cohort2.1%>%
 ### Factors associated with PSA nadir were age, baseline PSA, baseline ALP, skull involvement, spine involvement, Gleason score, De novo metastatic disease at presentation. 
 
 ### final factors are ge, baseline PSA, baseline ALP, skull involvement, Gleason score, De novo metastatic disease at presentation, spine involvement
+
+```
+
+
+```{r}
+save(cohort2, file=here("data", "soum_cohort.rdata"))
 
 ```
 
