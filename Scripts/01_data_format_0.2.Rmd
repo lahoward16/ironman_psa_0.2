@@ -71,7 +71,8 @@ formatted$subject_data <- medidata$subject %>%
          site, 
          site_name_short,
          site_country, 
-         is_metastatic_baseline) %>%
+         is_metastatic_baseline,
+         gleason_combined_derived) %>%
   # patients can select multiple races
   # variable of all races
   unite(c(race_26_1:race_26_7), col = "race_all", sep="; ", remove=FALSE, na.rm=TRUE) %>%
@@ -86,7 +87,7 @@ formatted$subject_data <- medidata$subject %>%
       count_na<7 ~ "More than one race",
       TRUE ~ NA_character_)) %>%
   rename(race_other = race_26_other) %>%
-  select(subject, race, race_black, race_all, race_other, site, 
+  select(subject, gleason_combined_derived, race, race_black, race_all, race_other, site, 
          site_name_short, site_country, is_metastatic_baseline, ethnicity = ethnicity_27)
 
 ```
@@ -192,6 +193,29 @@ all_psa <- medidata$psa %>%
 
 
 ```
+
+## ALP
+```{r}
+alk_data <- medidata$alk %>%
+  bind_rows(medidata$hxalk %>%
+              select(subject, alkval=hxalkval, alkdt_int=hxalkdt_int, hxalkunit) %>%
+              mutate(instance_name="Historical")) %>%
+  # replace <# to 0 and ># to #, replace comma to period
+  mutate(alktemp = alkval,
+         # replace comma to period
+         alktemp = gsub(",", ".", alktemp),
+         # replace ># to #
+         alktemp = str_remove(alktemp, ">"),
+         # convert to numeric
+         alktemp = as.numeric(alktemp)) %>%
+  # convert units to units/L:
+  mutate(alk = case_when(
+    hxalkunit == "IU/L" ~ alktemp,
+    hxalkunit == "uKat/L" ~ alktemp/0.0167,
+    hxalkunit == "units/L" ~ alktemp))  %>%
+  select(subject, alk, alk_date =alkdt_int)
+```
+
 
 ## Baseline mets
 ```{r}
@@ -571,6 +595,26 @@ formatted$primary_adt <- all_treatments %>%
 
 # Outcomes
 
+## ALK
+```{r}
+# pre-treatment psa - must be within 90 days before treatment or 30 days after
+formatted$alk_data <- alk_data %>%
+  # merge in enrollment date
+  inner_join(formatted$treatment_pivot, by="subject") %>% 
+  # alk closest to treatment start
+  mutate(timetoalk = as.Date(dt_lot_start1, format = "%Y-%m-%d", origin="1970-01-01") %--%
+                           as.Date(alk_date, format = "%Y-%m-%d") / days(1)) %>%
+  filter(timetoalk<=30 & timetoalk>=-90) %>%
+  #testing first alk timing
+  select(subject, alk_date, alk, timetoalk) %>%
+  arrange(subject, timetoalk) %>%
+  group_by(subject) %>%
+  slice(1) %>%
+  # note: all units are ng/mL or ug/L which are equivalent
+  select(subject, alk=alk, alk_date) 
+```
+
+
 ## Death
 ```{r}
 formatted$death_data <- medidata$pstatus %>%
@@ -693,9 +737,9 @@ formatted$psa6mo <- all_psa %>%
   slice(1) %>% 
   # categorize PSA
   mutate(psa_nadir6gp = cut(psa, 
-                            breaks = c(0, 0.02, 0.2, 1000000), 
+                            breaks = c(-1, 0.02, 0.2, 1000000), 
                             labels = c("<0.02", "0.02-0.2", ">0.2"))) %>% 
-  select(subject, psa_nadir6 = psa, psa_nadir6gp)
+  select(subject, psa_nadir6 = psa, psa_nadir6gp, psa_nadir6_date = psa_date)
 
 
 
@@ -721,9 +765,9 @@ formatted$psa12mo <- all_psa %>%
   slice(1) %>% 
   # categorize PSA
   mutate(psa_nadir12gp = cut(psa, 
-                            breaks = c(0, 0.02, 0.2, 1000000), 
+                            breaks = c(-1, 0.02, 0.2, 1000000), 
                             labels = c("<0.02", "0.02-0.2", ">0.2"))) %>% 
-  select(subject, psa_nadir12 = psa, psa_nadir12gp)
+  select(subject, psa_nadir12 = psa, psa_nadir12gp, psa_nadir12_date = psa_date)
 
 
 ```
@@ -776,6 +820,12 @@ all_data2 <- all_data %>%
     year = factor(year(dt_lot_start1)),
     year_consent = factor(year(cnstdate)),
     adt = replace_na(adt, 0),
+    
+    gleason_combined_derived = factor(gleason_combined_derived,
+                                      c(0,1,2,3,4,5,6,7,8,9,10),
+                                      c("6-7","6-7","6-7","6-7","6-7","6-7","6-7",
+                                        "6-7","8-10","8-10","8-10")),
+    
     
     # T-stage
     t_stage = case_when(
@@ -868,7 +918,7 @@ all_data2 <- all_data %>%
       met_bone %in% c(0,99) & met_lymph==1 & met_visceral==1 ~ 7, # lymph + visceral
       met_bone==1 & met_lymph==1 & met_visceral==1 ~ 8, # bone + lymph + visceral
       met_other==1 ~ 9, # other 
-      TRUE ~ 99 # unknown
+      TRUE ~ 9 # unknown
     ),
     
     # metastasis - 4 categories 
@@ -898,9 +948,15 @@ all_data2 <- all_data %>%
     dead = ifelse(is.na(dead), 0, 1),
     limbo = ifelse(dead==1, time_length(deathdate_int - dt_lot_start1, unit = "month"), 
                    time_length(new_censor_date - dt_lot_start1, unit = "month")),
-    
+    limbo6 = ifelse(dead==1, time_length(deathdate_int - psa_nadir6_date, unit = "month"), 
+                   time_length(new_censor_date - psa_nadir6_date, unit = "month")),
+    limbo12 = ifelse(dead==1, time_length(deathdate_int - psa_nadir12_date, unit = "month"), 
+                   time_length(new_censor_date - psa_nadir12_date, unit = "month")),
+   
     # diagnosis to treatment start
-    diag_tmt_start = time_length(dt_lot_start1 - diagbx_date_int, unit = "month")
+    diag_tmt_start = time_length(dt_lot_start1 - diagbx_date_int, unit = "month"),
+    alk150 = ifelse(alk>150, 1, 0),
+    pre_tmt_psa20 = ifelse(pre_tmt_psa>20, 1, 0)
   )
 
 ```
@@ -942,7 +998,7 @@ all_data2 <- all_data2 %>%
                      c(0,1,2,3),
                      c("N0", "N1", "N2", "N3")),
     met_combo = factor(met_combo,
-                          levels=c(0,1,2,3,5,6,7,8,9,99),
+                          levels=c(0,1,2,3,5,6,7,8,9),
                           labels=c("None reported",
                                    "Bone only",
                                    "Lymph node only",
@@ -951,8 +1007,7 @@ all_data2 <- all_data2 %>%
                                    "Bone, visceral",
                                    "Lymph node, visceral",
                                    "Bone, lymph node, visceral",
-                                   "Other",
-                                   "Unknown")),
+                                   "Other/Unknown")),
     met_combo4 = factor(met_combo4,
                            levels=c(0,1,2,3,4,5,6),
                            labels=c("Unknown",
@@ -980,10 +1035,13 @@ all_data2 <- all_data2 %>%
     primary_adt = factor(primary_adt, levels=ynlev2, labels=ynlab2),           
     rp_xrt = ifelse(is.na(rp_xrt), 0, 1),
     rp_xrt = factor(rp_xrt, levels=ynlev2, labels=ynlab2),   
-    dead = factor(dead, levels=ynlev2, labels=ynlab2))
+    dead = factor(dead, levels=ynlev2, labels=ynlab2),
+    alk150 = factor(alk150, levels = 0:1, labels = c("≤150", ">150")),
+    pre_tmt_psa20 = factor(pre_tmt_psa20, levels = 0:1, labels = c("≤20", ">20")))
 
 # label variables
 var_label(all_data2) <- list(
+  gleason_combined_derived = "Prostatectomy or biopsy Gleason score",
   site_country = "Country",
   year_consent = "Year of consent",
   year = "Year of treatment start",
@@ -1063,7 +1121,10 @@ var_label(all_data2) <- list(
   any_treatment_change_drug = "Drug regimen at treatment change",
   any_treatment_change_date = "Treatment change date",
   drugs_first_lot = "Drugs in the first LOT",
-  drugs_second_lot = "Drugs in the second LOT"
+  drugs_second_lot = "Drugs in the second LOT",
+  pre_tmt_psa20 = "Baseline PSA",
+  alk150 = "Baseline ALP",
+  denovomet_disease = "Denovo Metastases"
 )
 
 ```
