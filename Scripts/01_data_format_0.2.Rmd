@@ -211,9 +211,11 @@ alk_data <- medidata$alk %>%
   # convert units to units/L:
   mutate(alk = case_when(
     hxalkunit == "IU/L" ~ alktemp,
-    hxalkunit == "uKat/L" ~ alktemp/0.0167,
+    hxalkunit == "uKat/L" ~ alktemp*60,
     hxalkunit == "units/L" ~ alktemp))  %>%
   select(subject, alk, alk_date =alkdt_int)
+
+
 ```
 
 
@@ -595,7 +597,7 @@ formatted$primary_adt <- all_treatments %>%
 
 # Outcomes
 
-## ALK
+## ALP closest to baseline
 ```{r}
 # pre-treatment psa - must be within 90 days before treatment or 30 days after
 formatted$alk_data <- alk_data %>%
@@ -724,9 +726,9 @@ formatted$psa_nadir <- all_psa %>%
 # undetectable PSA within 6 months of treatment start (y/n)
 # must be before switching treatments
 formatted$psa6mo <- all_psa %>%
-  # keep PSAs within 6 mo after baseline PSA
-  left_join(formatted$psa_data, by="subject") %>%
-  mutate(timetopsa = time_length(psa_date - pre_tmt_psa_date, unit = "month")) %>%
+  # keep PSAs within 6 mo after treatment start
+  left_join(formatted$treatment_pivot, by="subject") %>%
+  mutate(timetopsa = time_length(psa_date - dt_lot_start1, unit = "month")) %>%
   filter(timetopsa>0 & timetopsa<=6) %>%
   # # keep PSAs before second treatment regimen
   left_join(formatted$tmt_change, by="subject") %>%
@@ -738,10 +740,28 @@ formatted$psa6mo <- all_psa %>%
   # categorize PSA
   mutate(psa_nadir6gp = cut(psa, 
                             breaks = c(-1, 0.02, 0.2, 1000000), 
-                            labels = c("<0.02", "0.02-0.2", ">0.2"))) %>% 
+                            labels = c("<0.02", "0.02-0.19", "≥0.2"),
+                            right = FALSE)) %>% 
   select(subject, psa_nadir6 = psa, psa_nadir6gp, psa_nadir6_date = psa_date)
 
 
+  # keep PSAs within 6 mo after treatment start
+test <- psa_for_merge %>% left_join(formatted$treatment_pivot, by="subject") %>%
+  mutate(timetopsa = time_length(psadt_int - dt_lot_start, unit = "month")) %>%
+  filter(timetopsa>0 & timetopsa<=6) %>%
+  # # keep PSAs before second treatment regimen
+  left_join(formatted$tmt_change, by="subject") %>%
+  filter(psadt_int<treatment_change_date | is.na(treatment_change_date)) %>%
+  # select lowest PSA
+  arrange(subject, psa, psadt_int) %>% 
+  group_by(subject) %>% 
+  slice(1) %>% 
+  # categorize PSA
+  mutate(psa_nadir6gp = cut(psa, 
+                            breaks = c(-1, 0.02, 0.2, 1000000), 
+                            labels = c("<0.02", "0.02-0.19", "≥0.2"),
+                            right = FALSE)) %>% 
+  select(subject, psa_nadir6 = psa, psa_nadir6gp, psa_nadir6_date = psadt_int)
 
 ```
 
@@ -753,8 +773,8 @@ formatted$psa6mo <- all_psa %>%
 # must be before switching treatments
 formatted$psa12mo <- all_psa %>%
   # keep PSAs within 12 mo after baseline PSA
-  left_join(formatted$psa_data, by="subject") %>%
-  mutate(timetopsa = time_length(psa_date - pre_tmt_psa_date, unit = "month")) %>%
+  left_join(formatted$treatment_pivot, by="subject") %>%
+  mutate(timetopsa = time_length(psa_date - dt_lot_start1, unit = "month")) %>%
   filter(timetopsa>0 & timetopsa<=12) %>%
   # keep PSAs before second treatment regimen
   left_join(formatted$tmt_change, by="subject") %>%
@@ -766,7 +786,8 @@ formatted$psa12mo <- all_psa %>%
   # categorize PSA
   mutate(psa_nadir12gp = cut(psa, 
                             breaks = c(-1, 0.02, 0.2, 1000000), 
-                            labels = c("<0.02", "0.02-0.2", ">0.2"))) %>% 
+                            labels = c("<0.02", "0.02-0.19", "≥0.2"),
+                            right = FALSE)) %>% 
   select(subject, psa_nadir12 = psa, psa_nadir12gp, psa_nadir12_date = psa_date)
 
 
