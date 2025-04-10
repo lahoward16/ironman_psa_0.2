@@ -317,6 +317,69 @@ cohort2 <- cohort2%>%
   rename(denovomets_yes = is_metastatic_baseline)
 ```
 
+## Baseline characteristics merge
+```{r}
+alk <- medidata$alk
+alk$alkval <- gsub("<", "", as.character(alk$alkval))
+alk$alkval <- gsub(">", "", as.character(alk$alkval))
+
+dt_lot_start <- cohort2%>%
+  select(subject, dt_lot_start, cnstdate_int)
+
+alk <- left_join(alk, dt_lot_start, by = "subject")%>%
+  mutate(alk_gap = as.duration(cnstdate_int%--%alkdt_int)/ddays(1))%>%
+  filter(alk_gap>=-90 & alk_gap<30)%>%
+  select(subject,alkval,hxalkunit,alkdt_int)%>%
+  distinct(subject, .keep_all = T)%>%
+  mutate(alkval = as.numeric(alkval))%>%
+  rename(baseline_alkval = alkval,
+         baseline_alkdt = alkdt_int)
+
+alk <- alk%>%
+  mutate(baseline_alkval = ifelse(hxalkunit=="uKat/L", baseline_alkval*60, baseline_alkval))%>%
+  select(-hxalkunit)
+
+## Joining with baseline PSA
+cohort2 <- left_join(cohort2, alk, by = "subject")
+
+cohort2$alkcat <- ifelse(cohort2$baseline_alkval<=150,"150 or less",">150")
+
+############ Age at diagnosis
+age <- medidata$dm%>%
+  select(subject, age)%>%
+  mutate(age = as.numeric(age))
+
+## Joining with baseline PSA
+cohort2 <- left_join(cohort2, age, by = "subject")
+
+
+############ Site of diagnosis ################################
+cs <- medidata$cs
+
+cs <- left_join(cs, dt_lot_start)%>%
+  mutate(cs_gap = as.duration(cnstdate_int%--%csdat_int)/ddays(1))%>%
+  filter(cs_gap>=-90 & cs_gap<30)%>%
+  select(subject, csskull, csspine, csliver, cslung, csext, cspelvis, csdn)%>%
+  distinct(subject, .keep_all = T)
+
+## Joining with baseline PSA
+cohort2 <- left_join(cohort2, cs, by = "subject")
+
+
+## Radiation data merge
+rt = medidata$ptradiation
+
+rt = rt%>%
+  select(subject, radreg, radregt, radregtarget, radtdose, radregdt)%>%
+  filter(radregt =="Definitive"|radregt=="Salvage")%>%
+  filter(str_detect(radregtarget,"Prostate|pelvis"))%>%
+  distinct(subject, .keep_all = T)%>%
+  mutate(Radiation = 1)
+
+cohort2 <- left_join(cohort2, rt, by = "subject")
+
+```
+
 
 ## Merging Race data
 ```{r}
@@ -344,6 +407,162 @@ Race <- Race%>%
   replace_na(list(Race = "Not reported"))
 
 cohort2 <- left_join(cohort2, Race%>%select(subject,Race), by = "subject")
+```
+
+## Merging baseline PSA
+```{r}
+psa <- medidata$psa
+psa$psa <- gsub("<", "", as.character(psa$psa))
+psa$psa <- gsub(">", "", as.character(psa$psa ))
+
+dt_lot_start <- cohort2%>%
+  select(subject, dt_lot_start, cnstdate_int)
+
+baseline_psa <- left_join(psa, dt_lot_start, by = "subject")%>%
+  mutate(psa_gap = as.duration(cnstdate_int%--%psadt_int)/ddays(1))%>%
+  filter(psa_gap<=30 & psa_gap>=(-90))%>%
+  select(subject,psa,psadt_int)%>%
+  distinct(subject, .keep_all = T)%>%
+  mutate(psa = as.numeric(psa))%>%
+  rename(baseline_psa = psa,
+         baseline_psadt = psadt_int) %>% 
+  mutate(baseline_psa_cat = ifelse(baseline_psa<=20,"<=20",">20"))
+
+
+cohort2 <- left_join(cohort2, baseline_psa, by = "subject")%>%
+  mutate(baseline_psa_cat = ifelse(baseline_psa<=20,"<=20",">20"))
+
+cohort2 <- cohort2%>%
+  replace_na(list(baseline_psa_cat="Unknown"))
+```
+
+## PSA nadir selection up to 6 months 
+```{r}
+psa <- medidata$psa
+psa$psa <- gsub("<", "", as.character(psa$psa)) ## Stripping off < and > characters
+psa$psa <- gsub(">", "", as.character(psa$psa)) ## Stripping off < and > characters
+
+psa_for_merge <- psa%>%
+  mutate(psa = as.numeric(psa)) ##Converting to numeric values
+
+psa_for_merge <- psa_for_merge%>%
+  select(subject, psa, psadt_int, instance_name,psadt_mm) ## Selecting necessary columns
+
+psa_for_merge <- psa_for_merge%>%
+  filter(subject %in% cohort2$subject) ## Selecting patients that had baseline PSA and other necessary information
+
+### Calculating time of PSA assessment since consent
+psa_for_merge <- left_join(psa_for_merge, cohort2%>%select(subject, cnstdate_int, dt_lot_start), by = "subject")%>%
+  mutate(PSA_gap = as.duration(cnstdate_int%--%psadt_int)/dmonths(1),
+         PSA_trt_gap = as.duration(dt_lot_start%--%psadt_int)/dmonths(1))
+
+#############################
+psa_for_merge6 <- psa_for_merge%>%
+  mutate(PSA_trt_gap = ifelse(is.na(PSA_trt_gap),PSA_gap, PSA_trt_gap))%>% ### Replace NA values in PSA gap by PSA_treatment gap
+  filter(PSA_trt_gap<=6 & PSA_trt_gap>0)%>% ### Selecting the PSA measuments within 6 months of enrolment and also making sure that this was after treatment initiation
+  group_by(subject)%>%
+  slice_min(order_by = psa)%>% ### Choosing the lowest PSA by those measurements within 6 months
+  ungroup()
+
+psa_for_merge6 <- psa_for_merge6%>%
+  mutate(PSA_Nadir6 = ifelse(psa<0.02,"<0.02",
+                            ifelse(psa>=0.02 & psa<=0.2, "0.02-0.2",">0.2"))) ### Categorizing the lowest PSA value
+
+psa_for_merge6 <- psa_for_merge6%>%
+  group_by(subject)%>%
+  slice_min(order_by = PSA_trt_gap) ### Choosing the lowest time to nadir for each subject
+
+
+psa_for_merge6 <- psa_for_merge6%>%
+  select(subject, psa, PSA_Nadir6, PSA_gap, PSA_trt_gap)%>%
+  rename(Nadir_value6 = psa,
+         PSA_gap6 = PSA_gap,
+         PSA_trt_gap6 = PSA_trt_gap)%>%
+  filter(!duplicated(subject))
+
+psa_for_merge6 <- psa_for_merge6%>%
+  drop_na(Nadir_value6) 
+
+cohort2 <- inner_join(cohort2, psa_for_merge6, by = "subject")%>%
+  mutate(PSA_Nadir6 = factor(PSA_Nadir6, levels =c("<0.02","0.02-0.2",">0.2")))
+```
+
+## PSA nadir selection up to 12 months
+```{r}
+psa <- medidata$psa
+psa$psa <- gsub("<", "", as.character(psa$psa)) ## Stripping off < and > characters
+psa$psa <- gsub(">", "", as.character(psa$psa)) ## Stripping off < and > characters
+
+psa_for_merge <- psa%>%
+  mutate(psa = as.numeric(psa)) ##Converting to numeric values
+
+psa_for_merge <- psa_for_merge%>%
+  select(subject, psa, psadt_int, instance_name,psadt_mm) ## Selecting necessary columns
+
+psa_for_merge <- psa_for_merge%>%
+  filter(subject %in% cohort2$subject) ## Selecting patients that had baseline PSA and other necessary information
+
+### Calculating time of PSA assessment since consent
+## Calculating time of PSA assessment since consent
+psa_for_merge <- left_join(psa_for_merge, cohort2%>%select(subject, cnstdate_int, dt_lot_start), by = "subject")%>%
+  mutate(PSA_gap = as.duration(cnstdate_int%--%psadt_int)/dmonths(1),
+         PSA_trt_gap = as.duration(dt_lot_start%--%psadt_int)/dmonths(1))
+
+#############################
+psa_for_merge12 <- psa_for_merge%>%
+  mutate(PSA_trt_gap = ifelse(is.na(PSA_trt_gap),PSA_gap, PSA_trt_gap))%>% ### Replace NA values in PSA gap by PSA_treatment gap
+  filter(PSA_trt_gap>0 & PSA_trt_gap<=12)%>% ### Selecting the PSA measuments within 12 months of enrolment and also making sure that this was after treatment initiation
+  group_by(subject)%>%
+  slice_min(order_by = psa)%>% ### Choosing the lowest PSA by those measurements within 12 months
+  ungroup()
+
+psa_for_merge12 <- psa_for_merge12%>%
+  mutate(PSA_Nadir12 = ifelse(psa<0.02,"<0.02",
+                            ifelse(psa>=0.02 & psa<=0.2, "0.02-0.2",">0.2"))) ### Categorizing the lowest PSA value
+
+psa_for_merge12 <- psa_for_merge12%>%
+  group_by(subject)%>%
+  slice_min(order_by = PSA_trt_gap) ### Choosing the lowest time to nadir for each subject
+
+
+psa_for_merge12 <- psa_for_merge12%>%
+  select(subject, psa, PSA_Nadir12, PSA_gap, PSA_trt_gap)%>%
+  rename(Nadir_value12 = psa,
+         PSA_gap12 = PSA_gap,
+         PSA_trt_gap12 = PSA_trt_gap)%>%
+  filter(!duplicated(subject))
+
+psa_for_merge12 <- psa_for_merge12%>%
+  drop_na(Nadir_value12) 
+
+cohort2 <- inner_join(cohort2, psa_for_merge12, by = "subject")%>%
+  mutate(PSA_Nadir12 = factor(PSA_Nadir12, levels =c("<0.02","0.02-0.2",">0.2")))
+```
+
+## Modifying columns in baseline data
+```{r}
+cohort2 <- cohort2%>%
+  mutate_at(vars(csliver, cslung, csdn, cspelvis, csext, csspine, csskull, denovomet_disease,alkcat), ~replace(., is.na(.), "Unknown"))
+
+
+cohort2 <- cohort2 %>%
+  mutate_at(vars(csliver, cslung, csdn, cspelvis, csspine, csskull, denovomet_disease), 
+            ~ factor(case_when(
+              . == "Yes" ~ "Yes",
+              . == "No" ~ "No",
+              TRUE ~ "Unknown",  # Handle NA as "unknown"
+              TRUE ~ as.character(.)), # Catch other cases
+              levels = c("Yes", "No", "Unknown")))
+```
+
+## Adding vital status
+```{r}
+pstatus <- medidata$pstatus%>%
+  select(subject, cod, deathdate)%>%
+  mutate(Dead=1)
+
+cohort2 <- left_join(cohort2, pstatus, by = "subject")%>%
+  replace_na(list(Dead=0))
 ```
 
 
@@ -386,7 +605,6 @@ cohort2 <- merge(cohort2, follow_up, by = "subject")
 
 ## Calculating OS from treatment start date
 cohort2.1 <- cohort2%>%
-  left_join(medidata$pstatus %>% select(subject, deathdate), by = "subject") %>% 
   mutate(OS_date = pmin(date_lfu, deathdate, na.rm = T),
          OS = as.duration(dt_lot_start%--%OS_date)/dmonths(1),
          PCSM = as.factor(ifelse(Dead==0,"Alive",
@@ -492,9 +710,690 @@ cohort2.1%>%
 
 ```
 
+## Calculating OS and multivariable regression
+```{r}
+dta_baseline <- cohort2.1%>%
+  filter(OS>12)%>%
+  mutate(OS = OS-12)
+
+### Number of deaths
+table(dta_baseline$Dead)
+
+### Number of patients who died with progression
+dta_baseline%>%select(Dead, any_progression)%>%table()
+
+### Number of patients with PCSM after progression
+dta_baseline%>%select(PCSM, any_progression)%>%table()
+
+####################################################################################
+### Simple survival analysis
+survival_nadir <- survfit(Surv(OS,Dead==1)~PSA_Nadir12, data = dta_baseline)
+### Survival at 3 years
+summary(survival_nadir, times = 36)
+
+### Logrank test (overall and pairwise comparisons)
+survdiff(Surv(OS,Dead==1)~PSA_Nadir12, data = dta_baseline, )
+
+pairwise_survdiff(Surv(OS,Dead==1)~PSA_Nadir12, data = dta_baseline, p.adjust.method = "bonferroni")
+
+### Survival curves by PSA nadir
+survfit2(Surv(OS,Dead==1)~PSA_Nadir12, data = dta_baseline)%>%
+  ggsurvfit(linetype_aes = T, linewidth = 1) + 
+  add_censor_mark() + 
+  add_confidence_interval() + 
+  add_risktable() + 
+  scale_ggsurvfit(x_scales = list(breaks = seq(0,48, by = 12)), y_scales = list(breaks = seq(0,1, by = 0.2))) + labs(x = "Time since landmark timepoint (in months)", y = "Overall survival probability") + 
+  theme_bw()
+
+###############################################################################
+### Multivariable Cox regression
+### The real covariables which had association with OS and PSA nadir were age, baseline psa category, alkphos category, csskull, denovo mets diease, and Gleason score. 
+cox_os <- coxph(Surv(OS,Dead==1)~PSA_Nadir12 + csskull + Gleason.total + denovomet_disease + age + alkcat, data = dta_baseline, x = T, y = T)
+summary(cox_os)
+
+cox.zph(cox_os) ## There was some violation of proportionality assumption
+
+###################################################################################
+# Is the association linear between time interval to PSA nadir and OS?
+
+library(splines)
+coxph(Surv(OS,Dead==1)~ns(PSA_trt_gap12,4), data = dta_baseline)%>%termplot(., rug = T,  xlabs = "Time interval to PSA nadir", ylabs = "Partial hazard ratio for OS", se = T)
+
+################ Now the same model with time interval to PSA nadir fitted with natural spline in patients with baseline PSA available
+library(splines)
+
+# Fit the Cox model with natural splines with 4 degrees of Freedom for PSA_gap
+cox_os1_spline <- coxph(Surv(OS, Dead == 1) ~ PSA_Nadir12 + ns(PSA_trt_gap12, df = 4) + csskull + Gleason.total + denovomet_disease + age + alkcat, data = dta_baseline, x = TRUE, y = TRUE)
+
+# Get the summary of the model
+summary(cox_os1_spline)
+
+termplot(cox_os1_spline, terms = 2, se = TRUE, rug = TRUE, xlabs = "Time interval to PSA nadir", ylabs = "Partial hazard ratio for OS") ###Slight non-linearity. I would go with the prior model for easier interpretability. 
+
+cox_os1_linear <- coxph(Surv(OS, Dead == 1) ~ PSA_Nadir12 + PSA_trt_gap12 + csskull + Gleason.total + denovomet_disease + age + alkcat, data = dta_baseline, x = TRUE, y = TRUE)
+
+# Get the summary of the model
+summary(cox_os1_linear)
+
+cox.zph(cox_os1_linear)
+
+######################################################################
+########### With categorical time interval to PSA nadir value
+dta_baseline <- dta_baseline%>%
+  mutate(PSA_gap1 = ifelse(PSA_trt_gap12<=3,"<=3",
+                           ifelse(PSA_trt_gap12>3 & PSA_trt_gap12<=6,">3-6",">6")))
+
+cox_os2 <- coxph(Surv(OS, Dead == 1) ~ PSA_Nadir12 + PSA_gap1 + csskull + Gleason.total + denovomet_disease + age + alkcat, 
+                        data = dta_baseline, x = TRUE, y = TRUE)
+
+# Get the summary of the model
+summary(cox_os2)
+
+cox.zph(cox_os2)
+
+####################################################################################
+### To account for violation of proportionality assumption in the model without time to PSA nadir #############
+# Load necessary library
+# Define the formula
+surv_formula <- Surv(OS, Dead == 1) ~ PSA_Nadir12 + csskull + Gleason.total + denovomet_disease + age + alkcat
+
+# List of distributions to test
+dist_list <- c("weibull", "lognormal", "loglogistic", "exponential", "gompertz")
+
+# Initialize an empty list to store the results
+model_list <- list()
+aic_list <- numeric(length(dist_list))
+
+# Loop through each distribution and fit the survival model
+for (i in seq_along(dist_list)) {
+  dist <- dist_list[i]
+  if (dist == "gompertz") {
+    # Gompertz is not directly available in survreg, so use flexsurv
+    model <- flexsurv::flexsurvreg(surv_formula, data = dta_baseline, dist = "gompertz")
+    aic_value <- model$AIC
+  } else {
+    # Fit the model using survreg for other distributions
+    model <- survreg(surv_formula, data = dta_baseline, dist = dist)
+    aic_value <- AIC(model)
+  }
+  
+  # Store model and AIC
+  model_list[[dist]] <- model
+  aic_list[i] <- aic_value
+}
+
+# Create a data frame with AIC values for comparison
+aic_results <- data.frame(
+  Distribution = dist_list,
+  AIC = aic_list
+)
+
+# Find the best distribution based on the lowest AIC
+best_model_index <- which.min(aic_results$AIC)
+best_model <- model_list[[dist_list[best_model_index]]]
+
+# Print AIC results and best model
+print(aic_results)
+
+cat("Best model distribution:", dist_list[best_model_index], "\n")
+
+summary(best_model)
+
+```
+
+## Cancer specific deaths
+```{r}
+dta_baseline$PCSM = factor(dta_baseline$PCSM, levels = c("Alive","PCSM","OCM"))
+table(dta_baseline$PCSM)
+
+dta_baseline%>%
+  group_by(PSA_Nadir12)%>%
+  select(PCSM)%>%table()
+
+dta_baseline%>%
+  group_by(PSA_Nadir12)%>%
+  select(PCSM)%>%table()%>%prop.table(margin = 1)
+
+##########################################################################################
+tidycmprsk::cuminc(Surv(OS,PCSM)~PSA_Nadir12, data = dta_baseline)%>%
+  tidycmprsk::tbl_cuminc(times = c(24,36, 48), label_header = "**Month {time}**")%>%
+  add_p()%>%
+  add_n()
+
+cuminc(Surv(OS, PCSM) ~ PSA_Nadir12, data = dta_baseline) %>%
+  ggcuminc(outcome = "PCSM") +
+  add_confidence_interval() +
+  add_risktable() +
+  scale_x_continuous(limits = c(0,48), breaks = c(0,12,24,36,48)) + 
+  scale_y_continuous(limits = c(0,1), n.breaks = 5) + 
+  labs(x = "Time since landmark timepoint (months)", y = "Cumulative incidence of CSM")
+
+#########33Competing risk regression with just PSA nadir level 
+tidycmprsk::crr(Surv(OS,PCSM)~PSA_Nadir12 + csskull + Gleason.total + denovomet_disease + age + alkcat, data = dta_baseline, failcode = "PCSM")
+
+######################## Competing risk regression with PSA nadir level and time to PSA nadir with natural splines and 4 degrees of freedom
+tidycmprsk::crr(Surv(OS,PCSM)~PSA_Nadir12 + ns(PSA_trt_gap12, 4) + csskull + Gleason.total + alkcat + denovomet_disease + age, data = dta_baseline, failcode = "PCSM")
+
+tidycmprsk::crr(Surv(OS,PCSM)~PSA_Nadir12 + PSA_trt_gap12 + csskull + Gleason.total + alkcat + denovomet_disease + age, data = dta_baseline, failcode = "PCSM")
+
+###With categorical time to PSA nadir interval
+
+tidycmprsk::crr(Surv(OS,PCSM)~PSA_Nadir12 + PSA_gap1 + csskull + Gleason.total + alkcat + denovomet_disease + age, data = dta_baseline, failcode = "PCSM")
+
+```
+
+## Cumulative incidence of progression
+```{r}
+dta_baseline_pfs <- cohort2.1%>%
+  filter(PFS>12)%>%
+  mutate(PFS = PFS-12) 
+
+dta_baseline_pfs <- dta_baseline_pfs%>%
+  mutate(PSA_gap1 = ifelse(PSA_trt_gap12<=3,"<=3",
+                           ifelse(PSA_trt_gap12>3 & PSA_trt_gap12<=6,">3-6",">6")))
+
+dta_baseline_pfs%>%
+  group_by(PSA_Nadir12)%>%
+  select(cum_prog)%>%table()
+
+dta_baseline_pfs%>%
+  group_by(PSA_Nadir12)%>%
+  select(cum_prog)%>%table()%>%prop.table(margin = 1)
+
+######################################################################################3
+dta_baseline_pfs%>%
+  group_by(PSA_Nadir12)%>%
+  select(any_progression)%>%
+  table()
+
+dta_baseline_pfs%>%
+  group_by(PSA_Nadir12)%>%
+  select(any_progression)%>%
+  table()%>%
+  prop.table(margin = 1)
+
+#################################################################################################
+tidycmprsk::cuminc(Surv(PFS,cum_prog)~PSA_Nadir12, data = dta_baseline_pfs)%>%
+  tidycmprsk::tbl_cuminc(times = c(24,36, 48), label_header = "**Month {time}**")%>%
+  add_p()%>%
+  add_n()
+
+cuminc(Surv(PFS,cum_prog) ~ PSA_Nadir12, data = dta_baseline_pfs) %>%
+  ggcuminc(outcome = "progression") +
+  add_confidence_interval() +
+  add_risktable() +
+  scale_x_continuous(limits = c(0,48), breaks = c(0,12,24,36,48)) + 
+  scale_y_continuous(limits = c(0,1), n.breaks = 5) + 
+  labs(x = "Time since landmark timepoint (months)", y = "Cumulative incidence of progression")
+
+#########33Competing risk regression with just PSA nadir level 
+tidycmprsk::crr(Surv(PFS,cum_prog)~PSA_Nadir12 + csskull + csspine + Gleason.total + denovomet_disease + age + alkcat, data = dta_baseline_pfs, failcode = "progression")
+
+######################## Competing risk regression with PSA nadir level and time to PSA nadir with natural splines and 4 degrees of freedom in patients with baseline PSA data
+
+tidycmprsk::crr(Surv(PFS,cum_prog)~PSA_Nadir12 + ns(PSA_trt_gap12, 4) + csskull + csspine + Gleason.total + denovomet_disease + age + alkcat, data = dta_baseline_pfs, failcode = "progression")
+
+### Linear term
+tidycmprsk::crr(Surv(PFS,cum_prog)~PSA_Nadir12 + PSA_trt_gap12 + csskull + csspine + Gleason.total + denovomet_disease + age + alkcat, data = dta_baseline_pfs, failcode = "progression")
+
+###With categorical time to PSA nadir interval
+
+tidycmprsk::crr(Surv(PFS, cum_prog)~PSA_Nadir12 + PSA_gap1 + csskull + csspine + Gleason.total +  denovomet_disease + age + alkcat, data = dta_baseline_pfs, failcode = "progression")
+
+```
+
+## PFS analysis
+```{r}
+dta_baseline_pfs%>%
+  filter(any_progression==1)%>%
+  select(PCSM)%>%
+  table()
+
+### After progression, 83 were alive, 72 had PCSM, 20 died of other causes. 
+
+survfit(Surv(PFS,progression==1)~PSA_Nadir12, data = dta_baseline_pfs)
+
+survfit(Surv(PFS,progression==1)~PSA_Nadir12, data = dta_baseline_pfs)%>%
+  summary(., times = 36)
+
+### Logrank test (overall and pairwise comparisons)
+survdiff(Surv(PFS,progression==1)~PSA_Nadir12, data = dta_baseline_pfs)
+
+pairwise_survdiff(Surv(PFS,progression==1)~PSA_Nadir12, data = dta_baseline_pfs, p.adjust.method = "bonferroni")
+
+### Survival curves by PSA nadir
+survfit2(Surv(PFS,progression==1)~PSA_Nadir12, data = dta_baseline_pfs)%>%
+  ggsurvfit(linetype_aes = T, linewidth = 1) + 
+  add_censor_mark() + 
+  add_confidence_interval() + 
+  add_risktable() + 
+  scale_ggsurvfit(x_scales = list(breaks = seq(0,48, by = 12)), y_scales = list(breaks = seq(0,1, by = 0.2))) + labs(x = "Time since landmark timepoint (in months)", y = "Progression-free survival probability") + 
+  theme_bw()
+
+######################################################################
+### Without time interval to PSA nadir
+cox_pfs <- coxph(Surv(PFS,progression==1)~PSA_Nadir12 + csskull + Gleason.total + denovomet_disease + age + csspine + alkcat, data = dta_baseline_pfs, x = T, y = T)
+summary(cox_pfs)
+
+cox.zph(cox_pfs) 
+
+#### Time to PSA Nadir fitted with natural spline with 4 degrees of freedom in patients with baseline PSA
+cox_pfs1_spline <- coxph(Surv(PFS,progression==1)~PSA_Nadir12 + ns(PSA_trt_gap12, 4) + csskull + Gleason.total + denovomet_disease + age + alkcat + csspine, data = dta_baseline_pfs, x = T, y = T)
+
+summary(cox_pfs1_spline)
+
+cox.zph(cox_pfs1_spline) 
+
+termplot(cox_pfs1_spline, terms = 2, se = TRUE, rug = TRUE, xlabs = "Time interval to PSA nadir", ylabs = "Partial hazard ratio for PFS") ###Slight non-linearity. I would go with the prior model for easier interpretability. 
+
+cox_pfs1_linear <- coxph(Surv(PFS,progression==1)~PSA_Nadir12 + PSA_trt_gap12 + csskull + Gleason.total + denovomet_disease + age + alkcat + csspine, data = dta_baseline_pfs, x = T, y = T)
+
+summary(cox_pfs1_linear)
+
+cox.zph(cox_pfs1_linear) 
+
+########### Time to PSA nadir as categorical variable
+cox_pfs12 <- coxph(Surv(PFS,progression==1)~PSA_Nadir12 + PSA_gap1 + csskull + Gleason.total + denovomet_disease + age + alkcat + csspine, data = dta_baseline_pfs, x = T, y = T)
+
+summary(cox_pfs12)
+
+cox.zph(cox_pfs12) 
+
+######################## Parametric survival models
+### To account for violation of proportionality assumption in the model without time to PSA nadir #############
+# Load necessary library
+# Define the formula
+surv_formula <- Surv(PFS, progression == 1) ~ PSA_Nadir12 + csskull + Gleason.total + denovomet_disease + age + csspine + alkcat
+
+# List of distributions to test
+dist_list <- c("weibull", "lognormal", "loglogistic", "exponential", "gompertz")
+
+# Initialize an empty list to store the results
+model_list <- list()
+aic_list <- numeric(length(dist_list))
+
+# Loop through each distribution and fit the survival model
+for (i in seq_along(dist_list)) {
+  dist <- dist_list[i]
+  if (dist == "gompertz") {
+    # Gompertz is not directly available in survreg, so use flexsurv
+    model <- flexsurv::flexsurvreg(surv_formula, data = dta_baseline, dist = "gompertz")
+    aic_value <- model$AIC
+  } else {
+    # Fit the model using survreg for other distributions
+    model <- survreg(surv_formula, data = dta_baseline_pfs, dist = dist)
+    aic_value <- AIC(model)
+  }
+  
+  # Store model and AIC
+  model_list[[dist]] <- model
+  aic_list[i] <- aic_value
+}
+
+# Create a data frame with AIC values for comparison
+aic_results <- data.frame(
+  Distribution = dist_list,
+  AIC = aic_list
+)
+
+# Find the best distribution based on the lowest AIC
+best_model_index <- which.min(aic_results$AIC)
+best_model <- model_list[[dist_list[best_model_index]]]
+
+# Print AIC results and best model
+print(aic_results)
+
+cat("Best model distribution:", dist_list[best_model_index], "\n")
+
+summary(best_model)
+
+
+```
+
+## Those who were excluded from and those who were included in the landmark analysis 
+```{r}
+dta_baseline_notincl <- cohort2.1%>%
+  filter(!subject %in% dta_baseline$subject)
+
+explan <- c("age","baseline_psa","baseline_psa_cat","alkcat","csliver","cslung","csdn","csskull","csspine","denovomet_disease","treatment","Gleason.total","PSA_Nadir6","baseline_alkval")
+
+dta_baseline_notincl%>%
+  summary_factorlist(explanatory = explan,
+                     dependent = "PSA_Nadir12",
+                     cont = "median",
+                     p_cat = "chisq",
+                     na_include = T,
+                     add_col_totals = T,
+                     p = T) ->t1.5
+
+dta_baseline_notincl%>%select(Dead)%>%table()
+
+dta_baseline_notincl%>%select(PCSM, any_progression)%>%table()
+
+dta_baseline_notincl%>%
+  group_by(PSA_Nadir12)%>%
+  select(PCSM)%>%
+  table()
+
+dta_baseline_notincl%>%
+  group_by(PSA_Nadir12)%>%
+  select(PCSM)%>%table()%>%
+  prop.table(margin = 1)
+
+dta_baseline_notincl%>%
+  group_by(PSA_Nadir12)%>%
+  select(cum_prog)%>%
+  table()
+
+dta_baseline_notincl%>%
+  group_by(PSA_Nadir12)%>%
+  select(cum_prog)%>%
+  table()%>%
+  prop.table(margin = 1)
+
+dta_baseline_notincl%>%
+  group_by(PSA_Nadir12)%>%
+  select(any_progression)%>%
+  table()
+
+dta_baseline_notincl%>%
+  group_by(PSA_Nadir12)%>%
+  select(any_progression)%>%
+  table()%>%
+  prop.table(margin = 1)
+
+#####################################
+dta_complete_notincl <- dta_baseline_notincl%>%
+  select(baseline_psa, baseline_alkval, age, Nadir_value12)%>%
+  drop_na()
+
+corr_matrix <- cor(dta_complete_notincl[, sapply(dta_complete_notincl, is.numeric)])
+corrplot::corrplot(corr_matrix, method = "circle", type = "upper", order = "hclust")
+
+###########################################
+library(GGally)
+
+ggpairs(dta_complete_notincl[, sapply(dta_complete_notincl, is.numeric)])
+
+####################################################################################################
+dta_baseline%>%
+  summary_factorlist(explanatory = explan,
+                     dependent = "PSA_Nadir12",
+                     cont = "median",
+                     p_cat = "chisq",
+                     na_include = T,
+                     add_col_totals = T,
+                     p = T) ->t1.6
+
+knitr::kable(t1.6)
+
+#####################################
+dta_complete <- dta_baseline%>%
+  select(baseline_psa, baseline_alkval, age, Nadir_value12)%>%
+  drop_na()
+
+corr_matrix <- cor(dta_complete[, sapply(dta_complete, is.numeric)])
+corrplot::corrplot(corr_matrix, method = "circle", type = "upper", order = "hclust")
+
+###########################################
+library(GGally)
+
+ggpairs(dta_complete[, sapply(dta_complete, is.numeric)])
+
+```
+
+## Non-landmark analysis with time to PSA nadir and PSA nadir level integrated
+```{r}
+library(smoothHR)
+library(Hmisc)
+library(rms)
+library(mgcv)
+
+cohort2.1 <- cohort2.1%>%
+  mutate(PSA_gap1 = ifelse(PSA_trt_gap12<=3,"<=3",
+                           ifelse(PSA_trt_gap12>3 & PSA_trt_gap12<=6,">3-6",">6")))
+
+
+
+#### Cox model with natural splines of time interval to PSA nadir with 4 degrees of freedom and outcome
+hr1 <- coxph(Surv(OS,Dead==1)~PSA_Nadir12 + ns(PSA_trt_gap12, 4) + csskull + Gleason.total + alkcat + denovomet_disease + age, data = cohort2.1, x = T, y = T)
+
+termplot(hr1, term = 2, col.term = 2, col.se = 2, se=TRUE, plot=T, xlab = "Time interval to PSA nadir", ylab = "Partial hazard ratio for time interval to PSA nadir")
+
+summary(hr1)
+
+cox.zph(hr1)
+
+### Heller's ERR
+clinfun::coxphERR(hr1, 1) 
+
+clinfun::coxphERR(hr1, 2) 
+
+clinfun::coxphERR(hr1, 3)
+
+clinfun::coxphERR(hr1, 4) 
+
+clinfun::coxphERR(hr1, 5) 
+
+clinfun::coxphERR(hr1, 6) 
+
+clinfun::coxphERR(hr1, 7) 
+
+clinfun::coxphERR(hr1, 8) 
+
+########### With categorical time interval to PSA nadir
+hr21 <- coxph(Surv(OS,Dead==1)~PSA_Nadir12 + PSA_gap1 + csskull + Gleason.total + alkcat + denovomet_disease + age, data = cohort2.1, x = T, y = T)
+
+cox.zph(hr21)
+
+summary(hr21)
+
+######################################### Linear fit of time to PSA nadir
+coxph(Surv(OS,Dead==1)~PSA_Nadir12 + PSA_trt_gap12 + csskull + Gleason.total + alkcat + denovomet_disease + age, data = cohort2.1, x = T, y = T)%>%summary()
+
+coxph(Surv(OS,Dead==1)~PSA_Nadir12 + PSA_trt_gap12 + csskull + Gleason.total + alkcat + denovomet_disease + age, data = cohort2.1, x = T, y = T)%>%cox.zph()
+
+####################################################################################################### We will be more simplistic
+### Multivariable Cox regression with PSA nadir levels and without time to PSA nadir
+hr2 <- coxph(Surv(OS,Dead==1)~PSA_Nadir12 + csskull + Gleason.total + denovomet_disease + age + alkcat, data = cohort2.1, x = T, y = T)
+
+cox.zph(hr2)
+
+summary(hr2)
+
+#######################################################################################################
+### Competing risk regression with PSA nadir level 
+
+cohort2.1$PCSM = factor(cohort2.1$PCSM, levels = c("Alive","PCSM","OCM"))
+
+tidycmprsk::crr(Surv(OS,PCSM)~PSA_Nadir12 + csskull + Gleason.total + denovomet_disease + age + alkcat + denovomet_disease, data = cohort2.1, failcode = "PCSM")
+
+### Competing risk regression with PSA nadir level and time to PSA nadir with natural spline and linear term
+tidycmprsk::crr(Surv(OS,PCSM)~PSA_Nadir12 + ns(PSA_trt_gap12, 4) + csskull + Gleason.total + alkcat + denovomet_disease + age, data = cohort2.1, failcode = "PCSM")
+
+tidycmprsk::crr(Surv(OS,PCSM)~PSA_Nadir12 + PSA_trt_gap12 + csskull + Gleason.total + alkcat + denovomet_disease + age, data = cohort2.1, failcode = "PCSM")
+
+###Now given the non_linear association, we would convert PSA gap to a categorical variable. 
+
+tidycmprsk::crr(Surv(OS,PCSM)~PSA_Nadir12 + PSA_gap1 + csskull + Gleason.total + alkcat + denovomet_disease + age, data = cohort2.1, failcode = "PCSM")
+
+################################################################################################
+#########33Competing risk regression with just PSA nadir level 
+tidycmprsk::crr(Surv(PFS,cum_prog)~PSA_Nadir12 + csskull + csspine + Gleason.total + denovomet_disease + age + alkcat, data = cohort2.1, failcode = "progression")
+
+######################## Competing risk regression with PSA nadir level and time to PSA nadir with spline and linear term
+tidycmprsk::crr(Surv(PFS,cum_prog)~PSA_Nadir12 + ns(PSA_trt_gap12, 4) + csskull + csspine + Gleason.total + denovomet_disease + age + alkcat, data = cohort2.1, failcode = "progression")
+
+tidycmprsk::crr(Surv(PFS,cum_prog)~PSA_Nadir12 + PSA_trt_gap12 + csskull + csspine + Gleason.total + denovomet_disease + age + alkcat, data = cohort2.1, failcode = "progression")
+
+###With categorical time to PSA nadir interval
+
+tidycmprsk::crr(Surv(PFS, cum_prog)~PSA_Nadir12 + PSA_gap1 + csskull + Gleason.total + denovomet_disease + age + csspine + alkcat, data = cohort2.1, failcode = "progression")
+
+```
+
+## Standard OS and Fine and Gray PCSM analysis in this non-landmark cohort
+```{r}
+### Simple survival analysis
+survival_nadir <- survfit(Surv(OS,Dead==1)~PSA_Nadir12, data = cohort2.1)
+### Survival at 3 years
+summary(survival_nadir, times = 36)
+
+### Logrank test (overall and pairwise comparisons)
+survdiff(Surv(OS,Dead==1)~PSA_Nadir12, data = cohort2.1)
+
+pairwise_survdiff(Surv(OS,Dead==1)~PSA_Nadir12, data = cohort2.1, p.adjust.method = "bonferroni")
+
+### Survival curves by PSA nadir
+survfit2(Surv(OS,Dead==1)~PSA_Nadir12, data = cohort2.1)%>%
+  ggsurvfit(linetype_aes = T, linewidth = 1) + 
+  add_censor_mark() + 
+  add_confidence_interval() + 
+  add_risktable() + 
+  scale_ggsurvfit(x_scales = list(breaks = seq(0,48, by = 12)), y_scales = list(breaks = seq(0,1, by = 0.2))) + theme_bw() + labs(legend.title = "PSA Nadir", x = "Time since landmark timepoint (months)", y = "Overall survival probability")
+
+###########################################################################################
+
+tidycmprsk::cuminc(Surv(OS,PCSM)~PSA_Nadir12, data = cohort2.1)%>%
+  tidycmprsk::tbl_cuminc(times = c(24,36, 48), label_header = "**Month {time}**")%>%
+  add_p()%>%
+  add_n()
+
+cuminc(Surv(OS, PCSM) ~ PSA_Nadir12, data = cohort2.1) %>%
+  ggcuminc(outcome = "PCSM") +
+  add_confidence_interval() +
+  add_risktable() +
+  scale_x_continuous(limits = c(0,48), breaks = c(0,12,24,36,48)) + 
+  scale_y_continuous(limits = c(0,1), n.breaks = 5)+ 
+  labs(x = "Time since landmark timepoint (months)", y = "Cumulative incidence of CSM")
+
+########################################################################
+tidycmprsk::cuminc(Surv(PFS,cum_prog)~PSA_Nadir12, data = dta_baseline)%>%
+  tidycmprsk::tbl_cuminc(times = c(24,36, 48), label_header = "**Month {time}**")%>%
+  add_p()%>%
+  add_n()
+
+cuminc(Surv(PFS,cum_prog) ~ PSA_Nadir12, data = dta_baseline) %>%
+  ggcuminc(outcome = "progression") +
+  add_confidence_interval() +
+  add_risktable() +
+  scale_x_continuous(limits = c(0,48), breaks = c(0,12,24,36,48)) + 
+  scale_y_continuous(limits = c(0,1), n.breaks = 5) + 
+  labs(x = "Time since landmark timepoint (months)", y = "Cumulative incidence of progression")
+
+###############################################################################3
+### Simple survival analysis
+survival_nadir <- survfit(Surv(PFS,progression==1)~PSA_Nadir12, data = cohort2.1)
+### Survival at 3 years
+summary(survival_nadir, times = 36)
+
+### Logrank test (overall and pairwise comparisons)
+survdiff(Surv(PFS,progression==1)~PSA_Nadir12, data = cohort2.1)
+
+pairwise_survdiff(Surv(PFS,progression==1)~PSA_Nadir12, data = cohort2.1, p.adjust.method = "bonferroni")
+
+### Survival curves by PSA nadir
+survfit2(Surv(PFS,progression==1)~PSA_Nadir12, data = cohort2.1)%>%
+  ggsurvfit(linetype_aes = T, linewidth = 1) + 
+  add_censor_mark() + 
+  add_confidence_interval() + 
+  add_risktable() + 
+  scale_ggsurvfit(x_scales = list(breaks = seq(0,48, by = 12)), y_scales = list(breaks = seq(0,1, by = 0.2))) + theme_bw() + labs(legend.title = "PSA Nadir", x = "Time since landmark timepoint (months)", y = "Progression-free survival probability")
+
+
+```
+
+## Forest plot in the full cohort with available baseline PSA data - for OS and PFS without time to PSA nadir by 12 months
+```{r}
+library(rms)
+f <- cph(Surv(OS,Dead==1)~PSA_Nadir12 + csskull + Gleason.total + alkcat + denovomet_disease + age + PSA_Nadir6, data = cohort2.1, x = T, y = T)
+
+anova_f <- anova(f)
+
+label_map <- c("csskull" = "Skull involvement", 
+               "baseline_psa" = "Baseline PSA",
+               "denovomet_disease" = "Denovo Metastatic Disease", 
+               "PSA_Nadir6" = "PSA Nadir at 6 Months", 
+               "alkcat" = "Baseline ALP", 
+               "Gleason.total" = "Gleason Score",
+               "age" = "Age", 
+               "PSA_Nadir12" = "PSA Nadir at 12 Months")
+
+# Modify the plot labels using the 'las' argument and apply the label map
+plot(anova_f, what = 'proportion chisq', 
+     labels = label_map[rownames(anova_f)], las = 2) 
+
+### For progression-free survival
+f1 <- cph(Surv(PFS,progression==1)~PSA_Nadir12 + csskull + Gleason.total + alkcat + denovomet_disease + age + PSA_Nadir6 + csspine, data = cohort2.1, x = T, y = T)
+
+anova_f1 <- anova(f1)
+
+# Create a named vector with the new labels
+label_map <- c("csskull" = "Skull involvement", 
+               "baseline_psa" = "Baseline PSA",
+               "denovomet_disease" = "Denovo Metastatic Disease", 
+               "PSA_Nadir6" = "PSA Nadir at 6 Months", 
+               "alkcat" = "Baseline ALP", 
+               "Gleason.total" = "Gleason Score",
+               "age" = "Age", 
+               "PSA_Nadir12" = "PSA Nadir at 12 Months", 
+               "csspine" = "Clinical Spine Involvement")
+
+# Modify the plot labels using the 'las' argument and apply the label map
+plot(anova_f1, what = 'proportion chisq', 
+     labels = label_map[rownames(anova_f1)], las = 2) 
+
+```
+
+
+## Forest plot in the full cohort with available baseline PSA data - for OS and PFS with time to PSA nadir by 12 months
+```{r}
+### For overall survival
+library(rms)
+f2 <- cph(Surv(OS,Dead==1)~PSA_Nadir12 + PSA_trt_gap12 + csskull + Gleason.total + alkcat + denovomet_disease + age + PSA_Nadir6, data = cohort2.1, x = T, y = T)
+
+anova_f2 <- anova(f2)
+
+label_map <- c("csskull" = "Skull involvement", 
+               "baseline_psa" = "Baseline PSA",
+               "denovomet_disease" = "Denovo Metastatic Disease", 
+               "PSA_Nadir6" = "PSA Nadir at 6 Months", 
+               "alkcat" = "Baseline ALP", 
+               "Gleason.total" = "Gleason Score",
+               "age" = "Age", 
+               "PSA_Nadir12" = "PSA Nadir at 12 Months", 
+               "PSA_trt_gap12" = "Time interval to PSA Nadir")
+
+# Modify the plot labels using the 'las' argument and apply the label map
+plot(anova_f2, what = 'proportion chisq', 
+     labels = label_map[rownames(anova_f2)], las = 2) 
+
+### For progression-free survival
+f11 <- cph(Surv(OS,Dead==1)~PSA_Nadir12 + PSA_trt_gap12 + csskull + Gleason.total + alkcat + denovomet_disease + age + PSA_Nadir6 + csspine, data = cohort2.1, x = T, y = T)
+
+anova_f11 <- anova(f11)
+
+# Create a named vector with the new labels
+label_map <- c("csskull" = "Skull involvement", 
+               "baseline_psa" = "Baseline PSA",
+               "denovomet_disease" = "Denovo Metastatic Disease", 
+               "PSA_Nadir6" = "PSA Nadir at 6 Months", 
+               "alkcat" = "Baseline ALP", 
+               "Gleason.total" = "Gleason Score",
+               "age" = "Age", 
+               "PSA_Nadir12" = "PSA Nadir at 12 Months", 
+               "PSA_trt_gap12" = "Time interval to PSA Nadir", 
+               "csspine" = "Clinical Spine Involvement")
+
+# Modify the plot labels using the 'las' argument and apply the label map
+plot(anova_f11, what = 'proportion chisq', 
+     labels = label_map[rownames(anova_f11)], las = 2) 
+
+```
+
 
 ```{r}
-save(cohort2, file=here("data", "soum_cohort.rdata"))
+save(cohort2.1, file=here("data", "soum_cohort.rdata"))
 
 ```
 
