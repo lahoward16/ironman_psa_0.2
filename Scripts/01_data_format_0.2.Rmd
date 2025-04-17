@@ -43,7 +43,8 @@ library(DT)
 
 # Read data
 ```{r}
-load("V:/IRONMAN/2024-11-04/2024-11-04_ironman.Rdata")
+date <- "2025-03-31"
+load(paste0("V:/IRONMAN/", date, "/", date, "_ironman.Rdata"))
 
 ```
 
@@ -60,7 +61,7 @@ formatted = list()
 
 ```
 
-# Pull data
+# Baseline data
 ## Subject data
 ```{r}
 # pull subject data; format race data
@@ -515,7 +516,16 @@ formatted$first_lot <- treatment_lot_drug %>%
   arrange(subject, treatment_on_study) %>%
   summarise(drugs_first_lot = paste(treatment_on_study, collapse = ", ")) %>%
   mutate(drugs_first_lot = gsub("ADT, ADT", "ADT", drugs_first_lot),
-         drugs_first_lot = gsub("ADT, ", "", drugs_first_lot))
+         drugs_first_lot = gsub("ADT, ", "", drugs_first_lot),
+         arpi_drug = case_when(
+           grepl("Abiraterone", drugs_first_lot) + 
+             grepl("Enzalutamide", drugs_first_lot) + 
+             grepl("Apalutamide", drugs_first_lot) + 
+             grepl("Darolutamide", drugs_first_lot) > 1 ~ ">1 ARPI drug",
+           grepl("Abiraterone", drugs_first_lot) ~ "Abiraterone",
+             grepl("Enzalutamide", drugs_first_lot) ~ "Enzalutamide", 
+             grepl("Apalutamide", drugs_first_lot) ~ "Apalutamide", 
+             grepl("Darolutamide", drugs_first_lot) ~ "Darolutamide"))
 formatted$second_lot <- treatment_lot_drug %>%
   left_join(formatted$treatment_pivot, by="subject") %>%
   # keep records after first LOT
@@ -679,6 +689,58 @@ formatted$tmt_change2 <- treatment %>%
   
 ```
 
+## New mets
+Mets at a new location from baseline
+```{r}
+
+formatted$fu_mets_data <- medidata$cs %>%
+  # drop baseline mets 
+  filter(instance_name != "Baseline 0") %>%
+  select(subject,
+         csdat_int,
+         csskull_std,
+         csthor_std,
+         csspine_std,
+         cspelvis_std,
+         csext_std,
+         csliver_std,
+         cslung_std,
+         csdn_std,
+         csoth_std) %>%
+  # pivot data to long
+  pivot_longer(!c(subject, csdat_int),
+               names_to = "location",
+               values_to = "mets_ind") %>%
+  # find first met of each type
+  filter(mets_ind==1) %>%
+  arrange(subject, csdat_int) %>%
+  group_by(subject, location) %>% 
+  slice(1) %>%
+  ungroup() %>%
+  # merge in baseline mets data
+  inner_join(formatted$mets_data, by="subject") %>% 
+  # drop records if the patient already had mets at that location at baseline
+  filter(!((csskull_std==1 & location=="csskull_std") |
+         (csthor_std==1 & location=="csthor_std") |
+         (csspine_std==1 & location=="csspine_std") |
+         (cspelvis_std==1 & location=="cspelvis_std") |
+         (csext_std==1 & location=="csext_std") |
+         (csliver_std==1 & location=="csliver_std") |
+         (cslung_std==1 & location=="cslung_std") |
+         (csdn_std==1 & location=="csdn_std") |
+         (csoth_std==1 & location=="csoth_std"))) %>%
+  # first new mets date for each patient
+  group_by(subject) %>% 
+  slice(1) %>%
+  ungroup() %>%
+  # merge in treatment change date
+  left_join(formatted$tmt_change, by="subject") %>%
+  # select mets dates before treatment change or no treatment change
+  filter(csdat_int<treatment_change_date | is.na(treatment_change_date)) %>%
+  select(subject, new_mets_date=csdat_int)
+  
+  
+```
 
 ## PSA calculations
 ```{r}
@@ -700,11 +762,30 @@ formatted$psa_data <- all_psa %>%
   select(subject, pre_tmt_psa=psa, pre_tmt_psa_date=psa_date) 
 
 
-# PSA nadir
+# PSA nadir below 0.2
+formatted$psa_nadir0.2 <- all_psa %>%
+  # keep PSAs after baseline 
+  inner_join(formatted$treatment_pivot, by="subject") %>% 
+  filter(psa_date>dt_lot_start1) %>%
+  # keep PSAs before second treatment regimen
+  left_join(formatted$tmt_change, by="subject") %>%
+  filter(psa_date<treatment_change_date | is.na(treatment_change_date)) %>%
+  # keep PSAs <0.2
+  filter(psa<0.2) %>% 
+  # find value and date of first psa <0.2
+  group_by(subject) %>%
+  mutate(psa_nadir0.2 = min(psa),
+         temp = ifelse(psa==psa_nadir0.2, psa_date, NA),
+         psa_nadir0.2_date = as.Date(min(temp, na.rm=TRUE), format = "%Y-%m-%d", origin = "1970-01-01")) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(subject, psa_nadir0.2, psa_nadir0.2_date)
+
+# PSA nadir (any value)
 formatted$psa_nadir <- all_psa %>%
-  # keep PSAs after baseline PSA/T0
-  left_join(formatted$psa_data, by="subject") %>%
-  filter(psa_date>pre_tmt_psa_date) %>%
+  # keep PSAs after baseline 
+  inner_join(formatted$treatment_pivot, by="subject") %>% 
+  filter(psa_date>dt_lot_start1) %>%
   # keep PSAs before second treatment regimen
   left_join(formatted$tmt_change, by="subject") %>%
   filter(psa_date<treatment_change_date | is.na(treatment_change_date)) %>%
@@ -716,6 +797,92 @@ formatted$psa_nadir <- all_psa %>%
   slice(1) %>%
   ungroup() %>%
   select(subject, psa_nadir, psa_nadir_date)
+
+# Last PSA
+formatted$last_psa <- all_psa %>%
+  # last PSA date
+  arrange(subject, desc(psa_date)) %>%
+  group_by(subject) %>%
+  slice(1) %>%
+  select(subject, last_psa_date = psa_date)
+
+# PSA progression
+# >25% increase in serum PSA from nadir within two consecutive measurements 
+# separated by at least one week, and an absolute increase >2.0 ng/mL while on ADT
+# if a second PSA is available prior to treatment switch, it should be higher that the 
+# progression PSA
+formatted$confirmed_psa_prog <- all_psa %>%
+  # keep PSAs after PSA nadir
+  inner_join(formatted$psa_nadir, by="subject") %>%
+  filter(psa_date>psa_nadir_date) %>%
+  # keep PSAs before second treatment regimen
+  left_join(formatted$tmt_change, by="subject") %>%
+  filter(psa_date<treatment_change_date | is.na(treatment_change_date)) %>%
+  # first PSA >=2 and 25% above nadir
+  mutate(recurflag = ifelse(psa >= psa_nadir + 2 & psa > psa_nadir*1.25, 1, 0),
+         recurflagdate = ifelse(recurflag==1, psa_date, NA)) %>%
+  # filter to patients who have a progression
+  group_by(subject) %>%
+  mutate(anyrecur = max(recurflag)) %>%
+  filter(anyrecur==1) %>%
+  # calculate progression date and PSA
+  mutate(confirmed_psa_prog_date = as.Date(min(recurflagdate, na.rm=TRUE), format = "%Y-%m-%d", origin = "1970-01-01"),
+         temp2 = ifelse(psa_date==confirmed_psa_prog_date, psa, NA),
+         confirmed_psa_at_prog = max(temp2, na.rm=TRUE)) %>%
+  # keep PSAs after progression date
+  filter(psa_date >= confirmed_psa_prog_date) %>%
+  # check for confirmatory PSA
+  mutate(temp3 = ifelse(psa > confirmed_psa_at_prog & psa_date >= confirmed_psa_prog_date + 7, 1, 0),
+         confirmflag = max(temp3),
+         n_psa = n()) %>%
+  ungroup() %>%
+  filter(confirmflag==1 | n_psa==1) %>%
+  select(subject, confirmed_psa_prog_date, confirmed_psa_at_prog) %>%
+  mutate(confirmed_psa_prog=1) %>%
+  distinct()
+
+# PSA progression without confirmed increase
+# >25% increase in serum PSA from nadir and an absolute increase >2.0 ng/mL while on ADT
+formatted$psa_prog2 <- all_psa %>%
+  # keep PSAs after PSA nadir
+  inner_join(formatted$psa_nadir, by="subject") %>%
+  filter(psa_date>psa_nadir_date) %>%
+  # keep PSAs before second treatment regimen
+  left_join(formatted$tmt_change, by="subject") %>%
+  filter(psa_date<treatment_change_date | is.na(treatment_change_date)) %>%
+  # first PSA >=2 and 25% above nadir
+  mutate(recurflag = ifelse(psa >= psa_nadir + 2 & psa > psa_nadir*1.25, 1, 0),
+         recurflagdate = ifelse(recurflag==1, psa_date, NA)) %>%
+  # filter to patients who have a progression
+  group_by(subject) %>%
+  mutate(anyrecur = max(recurflag)) %>%
+  filter(anyrecur==1) %>%
+  # calculate progression date and PSA
+  mutate(unconfirmed_psa_prog_date = as.Date(min(recurflagdate, na.rm=TRUE), format = "%Y-%m-%d", origin = "1970-01-01"),
+         temp2 = ifelse(psa_date==unconfirmed_psa_prog_date, psa, NA),
+         unconfirmed_psa_at_prog = max(temp2, na.rm=TRUE)) %>%
+  select(subject, unconfirmed_psa_prog_date, unconfirmed_psa_at_prog) %>%
+  mutate(unconfirmed_psa_prog=1) %>%
+  distinct()
+
+# Any PSA rise from nadir
+formatted$psa_rise <- all_psa %>%
+  # keep PSAs after PSA nadir
+  inner_join(formatted$psa_nadir, by="subject") %>%
+  filter(psa_date>psa_nadir_date) %>%
+  # keep PSAs before second treatment regimen
+  left_join(formatted$tmt_change, by="subject") %>%
+  filter(psa_date<treatment_change_date | is.na(treatment_change_date)) %>%
+  # select only records with PSA rise from nadir
+  filter(psa > psa_nadir) %>%
+  # find date of first PSA rise
+  arrange(subject, psa_date) %>%
+  group_by(subject) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(subject, psa_rise_date = psa_date) %>%
+  mutate(psa_rise=1) %>%
+  distinct()
 
 
 ```
@@ -739,35 +906,17 @@ formatted$psa6mo <- all_psa %>%
   slice(1) %>% 
   # categorize PSA
   mutate(psa_nadir6gp = cut(psa, 
-                            breaks = c(-1, 0.02, 0.2, 1000000), 
-                            labels = c("<0.02", "0.02-0.19", "≥0.2"),
+                            breaks = c(-1, 0.1, 0.2, 1000000), 
+                            labels = c("<0.1", "0.10-0.19", "≥0.2"),
                             right = FALSE)) %>% 
   select(subject, psa_nadir6 = psa, psa_nadir6gp, psa_nadir6_date = psa_date)
 
-
-  # keep PSAs within 6 mo after treatment start
-test <- psa_for_merge %>% left_join(formatted$treatment_pivot, by="subject") %>%
-  mutate(timetopsa = time_length(psadt_int - dt_lot_start, unit = "month")) %>%
-  filter(timetopsa>0 & timetopsa<=6) %>%
-  # # keep PSAs before second treatment regimen
-  left_join(formatted$tmt_change, by="subject") %>%
-  filter(psadt_int<treatment_change_date | is.na(treatment_change_date)) %>%
-  # select lowest PSA
-  arrange(subject, psa, psadt_int) %>% 
-  group_by(subject) %>% 
-  slice(1) %>% 
-  # categorize PSA
-  mutate(psa_nadir6gp = cut(psa, 
-                            breaks = c(-1, 0.02, 0.2, 1000000), 
-                            labels = c("<0.02", "0.02-0.19", "≥0.2"),
-                            right = FALSE)) %>% 
-  select(subject, psa_nadir6 = psa, psa_nadir6gp, psa_nadir6_date = psadt_int)
 
 ```
 
 
 ## Lowest PSA within 12 mo
-```{r}
+```{r} 
 # create fields for any PSA within 12 months of treatment start and
 # undetectable PSA within 12 months of treatment start (y/n)
 # must be before switching treatments
@@ -785,8 +934,8 @@ formatted$psa12mo <- all_psa %>%
   slice(1) %>% 
   # categorize PSA
   mutate(psa_nadir12gp = cut(psa, 
-                            breaks = c(-1, 0.02, 0.2, 1000000), 
-                            labels = c("<0.02", "0.02-0.19", "≥0.2"),
+                            breaks = c(-1, 0.1, 0.2, 1000000), 
+                            labels = c("<0.1", "0.10-0.19", "≥0.2"),
                             right = FALSE)) %>% 
   select(subject, psa_nadir12 = psa, psa_nadir12gp, psa_nadir12_date = psa_date)
 
@@ -838,15 +987,15 @@ all_data = Reduce(function(...) merge(..., by="subject", all=T), formatted)
 ```{r}
 all_data2 <- all_data %>%
   mutate(
-    year = factor(year(dt_lot_start1)),
-    year_consent = factor(year(cnstdate)),
+    year = year(dt_lot_start1),
+    year_consent = year(cnstdate),
     adt = replace_na(adt, 0),
     
+    gleason_combined_derived = replace_na(gleason_combined_derived, 99),
     gleason_combined_derived = factor(gleason_combined_derived,
-                                      c(0,1,2,3,4,5,6,7,8,9,10),
+                                      c(0,1,2,3,4,5,6,7,8,9,10,99),
                                       c("6-7","6-7","6-7","6-7","6-7","6-7","6-7",
-                                        "6-7","8-10","8-10","8-10")),
-    
+                                        "6-7","8-10","8-10","8-10","Unknown")),
     
     # T-stage
     t_stage = case_when(
@@ -856,6 +1005,9 @@ all_data2 <- all_data %>%
       clinstg_tstage %in% c("T3", "T3a", "T3b", "T3c") ~ 3,
       clinstg_tstage %in% c("T4", "T4a", "T4b")  ~ 4,
       clinstg_tstage %in% c("TX", "Unk", NA) ~ NA_real_),
+    t_stage_gp = case_when(t_stage %in% 0:2 ~ "T1/2",
+                           t_stage %in% 3:4 ~ "T3/4",
+                           TRUE ~ "Unknown"),
     
     # N-stage
     n_stage = case_when(
@@ -864,6 +1016,9 @@ all_data2 <- all_data %>%
       clinstg_nstage == "N2" ~ 2,
       clinstg_nstage == "N3" ~ 3,
       clinstg_nstage %in% c("NX", "Unk", NA) ~ NA_real_),
+    n_stage_gp = case_when(n_stage==0 ~ "N0",
+                           n_stage %in% 1:3 ~ "N1/2/3",
+                           TRUE ~ "Unknown"),
     
     # M-stage
     m_stage = case_when(
@@ -946,7 +1101,6 @@ all_data2 <- all_data %>%
     met_combo4 = case_when(
       is_metastatic_baseline==0 ~ 0, # no mets
       met_visceral==1 ~ 4, # any visceral 
-      met_bone==1 & met_lymph==1 ~ 3, # bone and lymph node
       met_bone==1 ~ 1, # bone only
       met_lymph==1 ~ 2, # lymph only
       met_other==1 ~ 5, # other
@@ -957,7 +1111,18 @@ all_data2 <- all_data %>%
     rp_xrt = ifelse(prior_rp==1 | prior_xrt==1, 1, 0), 
     
     # time to PSA nadir
-    ttn = time_length(psa_nadir_date - dt_lot_start1, unit = "month"), 
+    nadir_date = coalesce(psa_nadir0.2_date, treatment_change_date, last_psa_date),
+    ttn = time_length(nadir_date - dt_lot_start1, unit = "month"), 
+    nadir0.2 = ifelse(is.na(psa_nadir0.2_date), 0, 1),
+    
+    # each type of relapse (y/n)
+    new_mets = ifelse(is.na(new_mets_date), 0, 1),
+    treatment_change = ifelse(is.na(treatment_change_date), 0, 1),
+    new_mets_before_treatment_change = ifelse(new_mets_date < treatment_change_date &
+                                                new_mets==1 & treatment_change==1, 1, 0),
+    confirmed_psa_prog = ifelse(is.na(confirmed_psa_prog), 0, 1),
+    unconfirmed_psa_prog = ifelse(is.na(unconfirmed_psa_prog), 0, 1), 
+    psa_rise = ifelse(is.na(psa_rise), 0, 1), 
     
     # new censor date
     new_censor_date = as.Date(case_when(dt_lot_start1==censor_date ~  
@@ -965,20 +1130,83 @@ all_data2 <- all_data %>%
                                 TRUE ~ censor_date),
                               format = "%Y-%m-%d", origin="1970-01-01"),
     
+   # type of relapse:
+    # - semi-confirmed PSA progression
+    # - treatment change + new mets
+    # - treatment change to NEPC regimen (carboplatin +/- etoposide)
+    relapse_type = case_when(
+      confirmed_psa_prog==1 ~ "PSA progression",
+      treatment_change==1 & treatment_change_drug %in% 
+        c("Carboplatin", "Carboplatin, Chemotherapy", "Carboplatin, Docetaxel") ~ 
+        "Treatment change to NEPC regimen",
+      treatment_change==1 & new_mets_before_treatment_change==1 ~ 
+        "Treatment change with new mets",
+      TRUE ~ "No relapse"),
+
+    # relapse y/n
+    relapse = ifelse(confirmed_psa_prog==1 | 
+                       (treatment_change==1 & treatment_change_drug %in% 
+        c("Carboplatin", "Carboplatin, Chemotherapy", "Carboplatin, Docetaxel")) |
+                       (treatment_change==1 & new_mets_before_treatment_change==1), 1, 0),
+    
+    # date of relapse
+    relapse_date = case_when(
+      confirmed_psa_prog==1 ~ confirmed_psa_prog_date,
+      (treatment_change==1 & treatment_change_drug %in% 
+        c("Carboplatin", "Carboplatin, Chemotherapy", "Carboplatin, Docetaxel")) |
+                       (treatment_change==1 & new_mets_before_treatment_change==1) ~ treatment_change_date),
+    
+    
+    # time to relapse
+    # PSA relapse or treatment change with new mets prior or treatment change to NEPC regimen
+    # censor patients with treatment change at date of treatment change
+    tmt_relapse = case_when(
+      confirmed_psa_prog==1 ~ 
+        dt_lot_start1 %--% confirmed_psa_prog_date / months(1),
+      treatment_change==1 ~ 
+        dt_lot_start1 %--% treatment_change_date / months(1),
+      relapse==0 ~ 
+        dt_lot_start1 %--% new_censor_date / months(1)),
+   tmt_relapse6 = tmt_relapse - 6,
+   tmt_relapse12 = tmt_relapse - 12,
+    
+    
+    # time to PSA relapse
+    tmt_confirmed_psa_prog = case_when(
+      confirmed_psa_prog==1 ~ dt_lot_start1 %--% confirmed_psa_prog_date / months(1),
+      confirmed_psa_prog==0 & treatment_change==1 ~ dt_lot_start1 %--% treatment_change_date / months(1),
+      confirmed_psa_prog==0 & treatment_change==0 ~ dt_lot_start1 %--% new_censor_date / months(1)),
+
+    # time to unconfirmed PSA relapse
+    tmt_unconfirmed_psa_prog = case_when(
+      unconfirmed_psa_prog==1 ~ 
+        dt_lot_start1 %--% unconfirmed_psa_prog_date / months(1),
+      unconfirmed_psa_prog==0 & treatment_change==1 ~ 
+        dt_lot_start1 %--% treatment_change_date / months(1),
+      unconfirmed_psa_prog==0 & treatment_change==0 ~ 
+        dt_lot_start1 %--% new_censor_date / months(1)),
+    
+    # diagnosis to treatment start
+    diag_tmt_start = diagbx_date_int %--% dt_lot_start1 / months(1),
+
     # death
     dead = ifelse(is.na(dead), 0, 1),
-    limbo = ifelse(dead==1, time_length(deathdate_int - dt_lot_start1, unit = "month"), 
-                   time_length(new_censor_date - dt_lot_start1, unit = "month")),
-    limbo6 = ifelse(dead==1, time_length(deathdate_int - psa_nadir6_date, unit = "month"), 
-                   time_length(new_censor_date - psa_nadir6_date, unit = "month")),
-    limbo12 = ifelse(dead==1, time_length(deathdate_int - psa_nadir12_date, unit = "month"), 
-                   time_length(new_censor_date - psa_nadir12_date, unit = "month")),
+   limbo = ifelse(dead==1, time_length(deathdate_int - dt_lot_start1, unit = "month"), 
+                  time_length(new_censor_date - dt_lot_start1, unit = "month")),
+   # landmark analysis
+   limbo6 = limbo - 6,
+   limbo12 = limbo - 12,
    
-    # diagnosis to treatment start
-    diag_tmt_start = time_length(dt_lot_start1 - diagbx_date_int, unit = "month"),
-    alk150 = ifelse(alk>150, 1, 0),
-    pre_tmt_psa20 = ifelse(pre_tmt_psa>20, 1, 0)
-  )
+   alk150 = case_when(alk>150 ~ 1, 
+                      alk<=150 ~ 0,
+                      TRUE ~ 99),
+   pre_tmt_psa20 = case_when(pre_tmt_psa>20 ~ 1, 
+                             pre_tmt_psa<=20 ~ 0,
+                             TRUE ~ 99),
+   denovomet_disease = case_when(denovomet_disease=="No" ~ 0,
+                                 denovomet_disease=="Yes" ~ 1,
+                                 TRUE ~ 99)
+  ) 
 
 ```
 
@@ -996,18 +1224,22 @@ all_data2 <- all_data2 %>%
                            levels=c(1,2),
                            labels=c("mHSPC","CRPC")),
     # country ordered in terms of frequency - most to least frequent
+    race = replace_na(race, "Unknown"),
     race = fct_infreq(race, ordered = TRUE),
-    racegp = fct_lump_prop(race, 0.005),
+    racegp = fct_lump_prop(race, 0.01),
     racegp = factor(racegp, levels = c("white / caucasian",
                                        "african / african american / black / black british / caribbean",
                                        "asian / asian american / asian british",
                                        "More than one race",
-                                       "Other"),
-                    labels = c("White", 
-                               "Black", 
-                               "Asian", 
-                               "More than one race", 
-                               "A race not listed")),
+                                       "Other", 
+                                       "Unknown"),
+                    labels = c("White",
+                               "Black",
+                               "Asian",
+                               "More than one race",
+                               "A race not listed",
+                               "Unknown")),
+    racegp = fct_drop(racegp),
     ethnicity = factor(ethnicity),
     t_stage = factor(t_stage,
                      c(0, 1,2,3,4),
@@ -1057,8 +1289,16 @@ all_data2 <- all_data2 %>%
     rp_xrt = ifelse(is.na(rp_xrt), 0, 1),
     rp_xrt = factor(rp_xrt, levels=ynlev2, labels=ynlab2),   
     dead = factor(dead, levels=ynlev2, labels=ynlab2),
-    alk150 = factor(alk150, levels = 0:1, labels = c("≤150", ">150")),
-    pre_tmt_psa20 = factor(pre_tmt_psa20, levels = 0:1, labels = c("≤20", ">20")))
+    alk150 = factor(alk150, levels = ynlev, labels = c("≤150", ">150", "Unknown")),
+    pre_tmt_psa20 = factor(pre_tmt_psa20, levels = ynlev, 
+                           labels = c("≤20", ">20", "Unknown")),
+    denovomet_disease = factor(denovomet_disease, levels = ynlev, labels = ynlab),
+    confirmed_psa_prog = factor(confirmed_psa_prog, levels=ynlev2, labels=ynlab2),           
+    unconfirmed_psa_prog = factor(unconfirmed_psa_prog, levels=ynlev2, labels=ynlab2),        
+    relapse_num = relapse,
+    relapse = factor(relapse, levels=ynlev2, labels=ynlab2),
+  ) 
+
 
 # label variables
 var_label(all_data2) <- list(
@@ -1077,7 +1317,9 @@ var_label(all_data2) <- list(
   ethnicity = "Hispanic/Latino",
   age = "Age at enrollment",
   t_stage = "T stage at diagnosis",
+  t_stage_gp = "T stage at diagnosis",
   n_stage = "N stage at diagnosis",
+  n_stage_gp = "N stage at diagnosis",
   m_stage = "M stage at diagnosis",
   is_metastatic_baseline = "Any metastases reported",
   met_combo = "Site of metastases (subjects only counted once)",
@@ -1126,6 +1368,7 @@ var_label(all_data2) <- list(
   pre_tmt_psa_date = "Date of PSA before treatment start",
   psa_nadir = "PSA nadir",
   psa_nadir_date = "Date of PSA nadir",
+  psa_nadir0.2_date = "Date of PSA nadir <0.2",
   psa_nadir6 = "PSA nadir within 6 months",
   psa_nadir6gp = "PSA nadir within 6 months",
   psa_nadir12 = "PSA nadir within 12 months",
@@ -1145,7 +1388,11 @@ var_label(all_data2) <- list(
   drugs_second_lot = "Drugs in the second LOT",
   pre_tmt_psa20 = "Baseline PSA",
   alk150 = "Baseline ALP",
-  denovomet_disease = "Denovo Metastases"
+  alk = "Baseline ALP",
+  denovomet_disease = "Denovo Metastases",
+  arpi_drug = "ARPI drug",
+  nadir0.2 = "Patient achieved a PSA nadir <0.2",
+  ttn = "Time to nadir"
 )
 
 ```
@@ -1156,6 +1403,6 @@ var_label(all_data2) <- list(
 today_rec <- format(Sys.Date(), format="%Y%m%d")
 savfile<-here::here("data", paste0("ironman_psa0.2_", today_rec, ".RData"))
 save(all_data2, all_psa, file= savfile)
-Sys.time()
+today_rec
 
 ```
