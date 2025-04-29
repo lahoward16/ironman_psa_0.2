@@ -1101,6 +1101,7 @@ all_data2 <- all_data %>%
     met_combo4 = case_when(
       is_metastatic_baseline==0 ~ 0, # no mets
       met_visceral==1 ~ 4, # any visceral 
+      met_bone==1 & met_lymph==1 ~ 3, # met or bone
       met_bone==1 ~ 1, # bone only
       met_lymph==1 ~ 2, # lymph only
       met_other==1 ~ 5, # other
