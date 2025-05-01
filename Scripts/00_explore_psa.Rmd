@@ -63,16 +63,18 @@ subject_data <- medidata$subject %>%
 
 <!-- # PSA data -->
 
-```{r}
+
 ## PSA
-```{r}
+```{r} 
 # # pull data from PSA and HXPSA
 all_psa <- medidata$psa %>%
   select(subject, psa) %>%
   bind_rows(medidata$hxpsa %>%
               select(subject, psa=hxpsaval)) %>%
   # replace <# to 0 and ># to #, replace comma to period
-  mutate(# replace <# to #
+  mutate(# flag for having a < sign
+        less_than = grepl("<", psa),,
+        # replace <# to #
          psa = gsub("<", "", psa),
          # replace ># to #
          psa = str_remove(psa, ">"),
@@ -189,6 +191,17 @@ datatable(min_psa_site,
           )
 
 ```
+
+# Distribution of LOD for PSA
+```{r}
+all_psa %>% 
+  filter(less_than==TRUE & psa <= 0.02) %>% 
+  ggplot(aes(x=psa)) +
+  geom_histogram(fill = "blue", color = "black") +
+  labs(title = "Histogram of LOD for PSAs <=0.02", x = "PSA", y = "Frequency")
+
+```
+
 
 # Distribution of PSAs <=0.2
 ```{r}
