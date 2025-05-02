@@ -1060,6 +1060,8 @@ all_data2 <- all_data %>%
     met_other_visceral = ifelse(grepl(c("visc|adrenal|penis|hepa|fat|spleen|liver|spleen|uretal|effusion|ureteral"), csother2) | csother2 %in% c("peritoneal", "peritoneal metastasis", "peritoneum"), 1, 0),
     met_other_other = ifelse(!is.na(csother2) & met_other_bone==0 & met_other_lymph==0 &
                                met_other_visceral==0, 1, 0),
+    met_liver = ifelse(csliver_std==1 | grepl(c("liver|hepa"), csother2), 1, 0),
+    met_lung = ifelse(cslung_std==1 | grepl(c("lung"), csother2), 1, 0),
     
     # individual metastasis sites
     met_bone = case_when(
