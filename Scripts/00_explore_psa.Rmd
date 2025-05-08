@@ -193,23 +193,48 @@ datatable(min_psa_site,
 ```
 
 # Distribution of LOD for PSA
+This histogram contains all PSAs values with a < sign. 
 ```{r}
+
+less_than_format <- function(x) {
+ paste0("<", x)
+}
+
+
 all_psa %>% 
-  filter(less_than==TRUE & psa <= 0.02) %>% 
-  ggplot(aes(x=psa)) +
+  filter(less_than == TRUE & psa <= 0.2) %>% 
+  ggplot(aes(x = psa)) +
   geom_histogram(fill = "blue", color = "black") +
-  labs(title = "Histogram of LOD for PSAs <=0.02", x = "PSA", y = "Frequency")
+  labs(title = "Histogram of LOD for PSAs ≤0.02", x = "PSA", y = "Frequency") +
+  scale_x_continuous(breaks = seq(0, 0.2, by = 0.02), labels = less_than_format) +  # Adding more breaks to the x-axis
+  theme(
+    text = element_text(size = 16),  # Increasing the size of all fonts
+    axis.title = element_text(size = 16),
+    axis.text = element_text(size = 16),
+    plot.title = element_text(size = 18)
+  )
+
 
 ```
 
 
 # Distribution of PSAs <=0.2
+This histogram contains all PSA values ≤0.2
 ```{r}
+
+
 all_psa %>% 
   filter(psa<=0.2) %>% 
   ggplot(aes(x=psa)) +
   geom_histogram(binwidth = 0.01, fill = "blue", color = "black") +
-  labs(title = "Histogram of PSAs <=0.02", x = "PSA", y = "Frequency")
+  labs(title = "Histogram of PSAs <=0.02", x = "PSA", y = "Frequency") +
+  scale_x_continuous(breaks = seq(0, 0.2, by = 0.02)) +  # Adding more breaks to the x-axis
+  theme(
+    text = element_text(size = 16),  # Increasing the size of all fonts
+    axis.title = element_text(size = 16),
+    axis.text = element_text(size = 16),
+    plot.title = element_text(size = 18)
+  )
 
 ```
 
