@@ -1,0 +1,1410 @@
+
+#  title: 'IRONMAN: PSA <0.2 ng/ml after ARPI'
+#author: "Lauren Howard & Kerri-Anne Crowell"
+#date: "`r Sys.Date()`"
+#output: html_document
+#knit: (function(inputFile, encoding) { rmarkdown::render(inputFile, encoding = encoding, output_file = paste0("../Results/IRONMAN PSA 0.2 analysis ",Sys.Date(),'.html')) })
+
+
+# load packages
+library(readxl)
+library(tidyverse)
+library(lubridate)
+library(here)
+library(dplyr)
+library(knitr)
+library(labelled)
+library(writexl)
+#library(DT)
+library(gtsummary)
+library(ggsurvfit)
+library(consort)
+library(survival)
+library(kableExtra)
+library(tableHTML)
+library(finalfit)
+library(survival)
+library(survminer)
+library(ggalluvial)
+library(compareGroups)
+library(ggalluvial)
+library(sjPlot)
+library(survminer)
+#install.packages('consort')
+
+
+# Read data
+load(here("data", paste0("ironman_psa0.2_v3.120250505.RData")))
+
+
+# Consort diagram
+
+
+consort_data <- all_data2 %>% 
+  mutate(exclusion0 = case_when(
+    is.na(dt_lot_start1) ~ "Missing treatment data",
+    year==2025 ~ "Treatment started in 2025"
+  ),
+  exclusion1 = case_when(
+    cohort_std=="CRPC" ~ "CRPC",
+    is.na(cohort_std) ~ "Missing disease state",
+    TRUE ~ NA),
+  exclusion2 = case_when(
+    cohort_std=="CRPC" ~ NA,
+    tmt_regimen=="ADT monotherapy" ~ "ADT monotherapy",
+    tmt_regimen=="ADT + docetaxel" ~ "ADT + docetaxel",
+    tmt_regimen=="Other" ~ "Other treatment",
+    is.na(tmt_regimen) ~ "Missing treatment information", 
+    grepl("ARPI", tmt_regimen) & adt=="No" ~ "ARPI but no documented ADT"),
+  exclusion3 = case_when(
+    is.na(psa_nadir6) ~ "Missing follow-up PSA"
+    #is.na(pre_tmt_psa) ~ "Missing pre-treatment PSA"
+  ))
+
+out <- consort_plot(data = consort_data,
+                    orders = c(subject = "IRONMAN cohort",
+                               exclusion0 = "Exclude",
+                               subject = "Treatment started 2017-2024",
+                               exclusion1 = "Exclude",
+                               subject = "mHSPC",
+                               exclusion2 = "Exclude treatments",
+                               subject = "Treated with documented ADT + ARPI",
+                               exclusion3 = "Exclude missing PSA",
+                               subject = "Study cohort"),
+                    side_box = c("exclusion0", "exclusion1", "exclusion2", "exclusion3"),
+                    cex = 0.9)
+plot(out)
+
+# cohort for analysis
+cohort <- consort_data %>% 
+  filter(is.na(exclusion0) & is.na(exclusion1) & is.na(exclusion2) & is.na(exclusion3))  
+
+
+
+
+
+
+# Baseline characteristics 
+
+# remove comma from numbers
+theme_gtsummary_language("en", big.mark = "")
+
+cohort %>% 
+  mutate(tmt_regimen = droplevels(tmt_regimen),
+         site_country_gp = fct_lump_prop(site_country, 0.05)) %>% 
+  set_variable_labels(tmt_regimen = "Treatment regimen",
+                      site_country_gp = "Country") %>% 
+  select(psa_nadir6gp, age, year, tmt_regimen, arpi_drug, psa_nadir6,
+         pre_tmt_psa20, alk150, racegp, met_combo4, gleason_combined_derived,
+         t_stage_gp, n_stage_gp, denovomet_disease, diag_tmt_start, rp_xrt,
+         site_country_gp) %>% 
+  tbl_summary(by=psa_nadir6gp,
+              digits = list(psa_nadir6 ~ 2, year ~ 0),
+              type = year ~ "continuous") %>% 
+  add_overall() %>% 
+  bold_labels()
+
+#updating code to list all countries for ppt 51225 + KAC
+cohort %>% 
+  mutate(tmt_regimen = droplevels(tmt_regimen)) %>% 
+  set_variable_labels(
+    tmt_regimen = "Treatment regimen",
+    site_country = "Country"
+  ) %>% 
+  select(psa_nadir6gp, age, year, tmt_regimen, arpi_drug, psa_nadir6,
+         pre_tmt_psa20, alk150, racegp, met_combo4, gleason_combined_derived,
+         t_stage_gp, n_stage_gp, denovomet_disease, diag_tmt_start, rp_xrt,
+         site_country) %>% 
+  tbl_summary(by=psa_nadir6gp,
+              digits = list(psa_nadir6 ~ 2, year ~ 0),
+              type = year ~ "continuous") %>% 
+  add_overall() %>% 
+  bold_labels()
+
+#updating code for alluvial plot for ppt 51225 + KAC
+#alluvial plot with data
+# install.packages("ggalluvial")
+#library(ggalluvial)
+table(cohort$psa_nadir6gp)
+
+#looking at counts in each group
+count_data <- cohort %>%
+  count(psa_nadir6gp, psa_nadir12gp) %>%
+  mutate(label = paste0("n = ", n))
+
+
+ggplot(data = cohort, aes(
+  axis1 = psa_nadir6gp,
+  axis2 = psa_nadir12gp
+)) +
+  geom_alluvium(aes(fill = psa_nadir6gp), width = 1/12) +
+  geom_stratum(width = 2/12, fill = "grey90", color = "black") +
+  geom_text(
+    stat = "stratum",
+    aes(label = after_stat(stratum)),
+    angle = 0,
+    hjust = 0.5,
+    size = 5
+  ) +
+  scale_x_discrete(
+    limits = c("PSA Nadir 6 months", "PSA Nadir 12 months"),
+    expand = c(.05, .05)
+  ) +
+  scale_fill_manual(
+    values = c(
+      "<0.1" = "#A8D5BA",     # green
+      "0.10-0.19" = "#F9C5A5",  # peach/orange
+      "≥0.2" = "#A5B8E3"       # blue
+    )
+    )+
+  theme_minimal(base_size = 16) +  # larger base font
+  theme(
+    axis.text = element_text(color = "black", size = 14),
+    axis.title = element_text(color = "black", size = 16, face = "bold"),
+    legend.text = element_text(color = "black", size = 14),
+    legend.title = element_text(color = "black", size = 16),
+    plot.title = element_text(size = 18, face = "bold", color = "black", hjust = 0.5),
+    panel.grid = element_blank()
+  ) +
+  labs(
+    title = "PSA Transition: 6-month to 12-month",
+    fill = "PSA Nadir at 6 months",
+    y = "Frequency of Patients"   # <- this is the key line
+  )
+
+
+#add demographic breakdowns using comparegroups/ laurens previous code
+#all categorical vars (chi square across 3 groups)
+#updating code to list all countries for ppt
+
+cohort %>% 
+  mutate(tmt_regimen = droplevels(tmt_regimen),
+         denovomet_disease2 = ifelse(denovomet_disease %in% c("No", "Unknown"), "No/Unknown", "Yes"),
+         metastasis_group = case_when(
+           met_combo4 == "Bone only" ~ "Bone only",
+           met_combo4 == "Lymph node only" ~ "Lymph Node only",
+           met_combo4 == "Bone and lymph node" ~ "Bone + Nodal",
+           met_combo4 == "Any visceral" ~ "Any Visceral",
+           met_combo4 %in% c("Other", "Unknown") ~ "Other/Unknown"
+         ),
+         arpi_grouped = case_when(
+           arpi_drug == "Abiraterone" ~ "Abiraterone",
+           arpi_drug %in% c("Apalutamide", "Darolutamide", "Enzalutamide") ~ "Amides",
+           TRUE ~ NA_character_  # this will drop ">1 ARPI drug" from analysis but still shows in table
+         
+         ),
+         race_group = case_when(
+           racegp == "White" ~ "White",
+           racegp == "Black" ~ "Black",
+           racegp == "Asian" ~ "Asian",
+           racegp %in% c("A race not listed", "Unknown") ~ "Other/Unknown"
+         ),
+         race_group = factor(race_group, levels = c("White", "Black", "Asian", "Other/Unknown")),
+         site_country_gp = fct_lump_prop(site_country, 0.05))%>%
+  set_variable_labels(tmt_regimen = "Treatment regimen",
+                      site_country_gp = "Country",
+                      race_group = "Race (not listed + Unknown)",
+                      metastasis_group = "Site of mets (other group + Unknown)",
+                      denovomet_disease2 = "de novo binary")%>% 
+  select(psa_nadir12gp, age, year, tmt_regimen, arpi_drug, arpi_grouped, psa_nadir12,
+         pre_tmt_psa20, alk150,metastasis_group, gleason_combined_derived,
+         t_stage_gp, n_stage_gp, denovomet_disease2, diag_tmt_start, rp_xrt,
+         site_country_gp) %>% 
+  tbl_summary(by=psa_nadir12gp,
+              digits = list(psa_nadir12 ~ 2, year ~ 0),
+              type = year ~ "continuous") %>% 
+  add_overall() %>% 
+  bold_labels()%>% 
+  add_p()
+
+#using comparegroups
+forbreakdown_12 <- cohort %>% 
+  mutate(
+  denovomet_disease2 = ifelse(denovomet_disease %in% c("No", "Unknown"), "No/Unknown", "Yes"),
+
+# Group ARPI drugs
+arpi_grouped = case_when(
+  arpi_drug == "Abiraterone" ~ "Abiraterone",
+  arpi_drug %in% c("Apalutamide", "Darolutamide", "Enzalutamide") ~ "Amides",
+  TRUE ~ NA_character_  # this will drop ">1 ARPI drug" from analysis but still shows in table
+))%>% 
+  select(age, psa_nadir6gp, psa_nadir12gp, year, tmt_regimen, arpi_drug,arpi_grouped, psa_nadir12,
+         pre_tmt_psa20, alk150, racegp, met_combo4, gleason_combined_derived,
+         t_stage_gp, n_stage_gp, denovomet_disease, denovomet_disease2, diag_tmt_start, rp_xrt,
+         site_country)
+
+createTable(compareGroups(psa_nadir12gp~., data = forbreakdown_12,method = NA))
+
+
+
+# consort_data %>% 
+#   filter(is.na(exclusion1) & is.na(exclusion2)) %>% 
+#   mutate(tmt_regimen = droplevels(tmt_regimen)) %>% 
+#   set_variable_labels(tmt_regimen = "Treatment regimen") %>% 
+#   select(psa_nadir6gp, age, tmt_regimen, denovomet_disease, psa_nadir6,
+#          pre_tmt_psa20, alk150, racegp, met_combo4, gleason_combined_derived) %>% 
+#   tbl_summary(digits = list(psa_nadir6 ~ 2)) %>% 
+#   bold_labels()
+
+
+#Survival analyses
+#creating cohort just for survival
+forsurvival_os <- cohort %>%
+  select(subject,limbo,limbo6,limbo12, dead, psa_nadir6gp ,psa_nadir12gp)
+attach(forsurvival_os)
+
+#checking survival outcome measures
+#time from treatment initiation to death or censor date (months)
+summary(forsurvival_os$limbo)
+summary(forsurvival_os$dead)
+table(cohort$any_progression)
+#################################################################################
+#number and % of patients in each PSA nadir strata at 6 and 12 months
+################################################################################
+
+# Create 6-month summary
+table6 <- forsurvival_os %>%
+  count(psa_nadir6gp) %>%
+  mutate(pct_6mo = round(100 * n / sum(n), 2))
+
+# Create 12-month summary
+table12 <- forsurvival_os %>%
+  count(psa_nadir12gp) %>%
+  mutate(pct_12mo = round(100 * n / sum(n), 2))
+
+# Merge and rename
+final_table <- full_join(table6, table12, 
+                         by = c("psa_nadir6gp" = "psa_nadir12gp")) %>%
+  select(PSA_Nadir_Group = psa_nadir6gp,
+         `N at 6 months` = n.x,
+         `% at 6 months` = pct_6mo,
+         `N at 12 months` = n.y,
+         `% at 12 months` = pct_12mo)
+
+# Add total row
+final_table <- bind_rows(
+  final_table,
+  tibble(
+    PSA_Nadir_Group = "Total",
+    `N at 6 months` = sum(final_table$`N at 6 months`, na.rm = TRUE),
+    `% at 6 months` = 100.00,
+    `N at 12 months` = sum(final_table$`N at 12 months`, na.rm = TRUE),
+    `% at 12 months` = 100.00
+  )
+)
+
+# Print as table
+kable(final_table, caption = "Distribution of PSA Nadir Groups at 6 and 12 Months")
+
+
+################################################################################
+#Unadjusted KM in cohort no stratification
+################################################################################
+survfit2(Surv(limbo, dead=="Yes") ~ 1, data = forsurvival_os) |>
+  ggsurvfit(linewidth = 1) +
+  add_risktable( risktable_stats = c("n.risk", "cum.event"), 
+                 size=4,# increase font size of risk table title and y-axis label
+                 theme =   
+                   list(
+                     theme_risktable_default(axis.text.y.size = 10, 
+                                             plot.title.size = 12),
+                     theme(plot.title = element_text(face = "bold"))
+                   )) +
+ # add_pvalue(caption = "Log-rank {p.value}") +
+  #add_pvalue("annotation", size = 10)+
+  coord_cartesian(xlim = c(0, 60)) +
+  scale_x_continuous(expand = c(0.01, 1), breaks = seq(0, 60, 12)) +
+  scale_y_continuous(limits = c(0, 1), label = scales::label_percent()) +
+  
+  theme_classic() +
+  theme(legend.position = c(0.48, 0.45),
+        legend.text = element_text(size=13, color = "black"),  # Legend text color
+        axis.title.x = element_text(size = 13, color = "black"),  # X-axis title
+        axis.title.y = element_text(size = 13, color = "black"),  # Y-axis title
+        axis.text.x = element_text(size = 13, color = "black"),   # X-axis tick labels
+        axis.text.y = element_text(size = 13, color = "black"))+   # Y-axis tick labels) +
+  labs(
+    y = "Overall survival",
+    x = "Time from treatment initiation (months)",
+    title = "",
+  ) + 
+  ggeasy::easy_y_axis_labels_size(size = 13) +
+  ggeasy::easy_x_axis_labels_size(size = 13) +
+  ggeasy::easy_y_axis_title_size(size = 13) +
+  ggeasy::easy_x_axis_title_size(size = 13)
+
+summary(survfit2(Surv(limbo, dead=="Yes") ~ 1, data = forsurvival_os), times = c(12,36,60,120))
+
+
+
+## Median follow-up
+#This table shows the median follow-up time
+
+tbl_survfit(
+  survfit(Surv(limbo, dead=="No")~1,
+          data = forsurvival_os),
+  probs = 0.5,
+  label_header = "**Median Follow-Up (95% CI)**",
+  #label = list(tmt_regimen ~ "Treatment group")
+) %>%
+  modify_header(label = "") 
+
+################################################################################
+#Unadjusted KM by cohort by psa_nadir6gp (Lowest PSA within 6 months but before switching treatments)
+################################################################################
+table(forsurvival_os$psa_nadir6gp)
+survfit2(Surv(limbo, dead == "Yes") ~ psa_nadir6gp, data = forsurvival_os) |>
+  ggsurvfit(linewidth = 1.5) +
+  #add_quantile(quantiles = 0.5, linetype = "dashed", color = "black")#draws both horizontal/vert 50%
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", linewidth = 0.8)+
+  
+  add_risktable(
+    risktable_stats = "n.risk",
+    size = 5,
+    theme = theme_risktable_default(
+      axis.text.y.size = 15,
+      plot.title.size = 15
+    )
+  ) +
+  
+ # add_pvalue(caption = "Log-rank test: {p.value}", size = 5) +
+  
+  coord_cartesian(xlim = c(0, 60)) +
+  scale_x_continuous(breaks = seq(0, 60, 12), expand = c(0.01, 1)) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::label_percent()) +
+  
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 17),
+    axis.title = element_text(color = "black", size = 17),
+    axis.text = element_text(color = "black", size = 17),
+    legend.position = "none")+  # ← removes legend completely
+    #legend.position = c(0.48, 0.45),
+   # legend.title = element_blank(),
+  #  legend.text = element_text(size = 13, color = "black")
+  #) 
+  
+  labs(
+    title = "",
+    x = "Time from treatment initiation (months)",
+    y = "Overall survival"
+  )
+
+
+#obtain KM estimates and 95% CI
+summary(survfit2(Surv(limbo, dead=="Yes") ~ psa_nadir6gp, data = forsurvival_os), times = c(12,36,60))
+
+### Logrank test (overall and pairwise comparisons)
+survdiff(Surv(limbo, dead=="Yes")~psa_nadir6gp, data = forsurvival_os, )
+
+#pairwise using bonferroni
+pairwise_survdiff(Surv(limbo, dead=="Yes")~psa_nadir6gp, data = forsurvival_os, p.adjust.method = "bonferroni")
+
+## Median follow-up
+#This table shows the median follow-up time by treatment regimen. 
+
+tbl_survfit(
+  survfit(Surv(limbo, dead=="No")~psa_nadir6gp,
+          data = forsurvival_os),
+  probs = 0.5,
+  label_header = "**Median Follow-Up (95% CI)**",
+  #label = list(tmt_regimen ~ "Treatment group")
+) %>%
+  modify_header(label = "") 
+
+#med survival
+survfit2(Surv(limbo, dead == "Yes") ~ psa_nadir6gp, data = forsurvival_os) %>%
+  surv_median()
+
+
+################################################################################
+#Unadjusted KM by cohort by psa_nadir12gp (Lowest PSA within 12 months but before switching treatments)
+################################################################################
+table(forsurvival_os$psa_nadir12gp)
+survfit2(Surv(limbo, dead == "Yes") ~ psa_nadir12gp, data = forsurvival_os) |>
+  ggsurvfit(linewidth = 1.5) +
+  #add_quantile(quantiles = 0.5, linetype = "dashed", color = "black")#draws both horizontal/vert 50%
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", linewidth = 0.8)+
+  
+  add_risktable(
+    risktable_stats = "n.risk",
+    size = 5,
+    theme = theme_risktable_default(
+      axis.text.y.size = 15,
+      plot.title.size = 15
+    )
+  ) +
+  
+  # add_pvalue(caption = "Log-rank test: {p.value}", size = 5) +
+  
+  coord_cartesian(xlim = c(0, 60)) +
+  scale_x_continuous(breaks = seq(0, 60, 12), expand = c(0.01, 1)) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::label_percent()) +
+  
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 17),
+    axis.title = element_text(color = "black", size = 17),
+    axis.text = element_text(color = "black", size = 17),
+   # legend.position = "none")+  # ← removes legend completely
+  legend.position = c(0.33, 0.25),
+  legend.direction = "horizontal",
+   legend.title = element_blank(),
+    legend.text = element_text(size = 25, color = "black")
+  ) +
+  
+  labs(
+    title = "",
+    x = "Time from treatment initiation (months)",
+    y = "Overall survival"
+  )
+
+
+#obtain KM estimates and 95% CI
+summary(survfit2(Surv(limbo, dead=="Yes") ~ psa_nadir12gp, data = forsurvival_os), times = c(12,36,60))
+summary(survfit2(Surv(limbo, dead=="Yes") ~ psa_nadir12gp, data = forsurvival_os), times = c(50))
+
+### Logrank test (overall and pairwise comparisons)
+survdiff(Surv(limbo, dead=="Yes")~psa_nadir12gp, data = forsurvival_os, )
+
+#pairwise using bonferroni
+pairwise_survdiff(Surv(limbo, dead=="Yes")~psa_nadir12gp, data = forsurvival_os, p.adjust.method = "bonferroni")
+
+## Median follow-up
+#This table shows the median follow-up time by treatment regimen. 
+
+tbl_survfit(
+  survfit(Surv(limbo, dead=="No")~psa_nadir12gp,
+          data = forsurvival_os),
+  probs = 0.5,
+  label_header = "**Median Follow-Up (95% CI)**",
+  label = list(psa_nadir12gp ~ "PSA group")
+) 
+
+#med survival
+survfit2(Surv(limbo, dead == "Yes") ~ psa_nadir12gp, data = forsurvival_os) %>%
+  surv_median()
+
+################################################################################
+#next to look at landmark analysis 
+#6 month
+################################################################################
+#starting from 6 months after treatment initiation to death or censor date (months)
+#6 month landmark KM stratified by 6 month PSA nadir group
+summary(forsurvival_os$limbo6)#neg min, will only include those with positive values 
+
+# Remove records with negative limbo
+forsurvival_6lndmk <- forsurvival_os %>%
+  filter(limbo6 >= 0)
+
+survfit2(Surv(limbo6, dead=="Yes") ~ psa_nadir6gp, data = forsurvival_6lndmk) |>
+  ggsurvfit(linewidth = 1.5) +
+  #add_quantile(quantiles = 0.5, linetype = "dashed", color = "black")#draws both horizontal/vert 50%
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", linewidth = 0.8)+
+  
+  add_risktable(
+    risktable_stats = "n.risk",
+    size = 5,
+    theme = theme_risktable_default(
+      axis.text.y.size = 15,
+      plot.title.size = 15
+    )
+  ) +
+  
+  # add_pvalue(caption = "Log-rank test: {p.value}", size = 5) +
+  
+  coord_cartesian(xlim = c(0, 60)) +
+  scale_x_continuous(breaks = seq(0, 60, 12), expand = c(0.01, 1)) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::label_percent()) +
+  
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 17),
+    axis.title = element_text(color = "black", size = 17),
+    axis.text = element_text(color = "black", size = 17),
+     legend.position = "none")+  # ← removes legend completely
+    #legend.position = c(0.33, 0.25),
+    #legend.direction = "horizontal",
+    #legend.title = element_blank(),
+    #legend.text = element_text(size = 25, color = "black")
+ # ) +
+  
+  labs(
+    title = "",
+    x = "Time from 6-month-landmark (months)",
+    y = "Overall survival"
+  )
+
+
+#obtain KM estimates and 95% CI
+summary(survfit2(Surv(limbo6, dead=="Yes") ~ psa_nadir6gp, data = forsurvival_6lndmk), times = c(12,24,36))
+
+
+
+### Logrank test (overall and pairwise comparisons)
+survdiff(Surv(limbo6, dead=="Yes")~psa_nadir6gp, data = forsurvival_6lndmk, )
+
+#pairwise using bonferroni
+pairwise_survdiff(Surv(limbo6, dead=="Yes")~psa_nadir6gp, data = forsurvival_6lndmk, p.adjust.method = "bonferroni")
+
+
+
+#med follow up
+tbl_survfit(
+  survfit(Surv(limbo6, dead=="No")~psa_nadir6gp,
+          data = forsurvival_6lndmk),
+  probs = 0.5,
+  label_header = "**Median Follow-Up (95% CI)**",
+  label = list(psa_nadir6gp ~ "PSA group")
+) 
+
+################################################################################
+#12 month landmark
+################################################################################
+#starting from 12 months after treatment initiation to death or censor date (months)
+#12 month landmark KM stratified by 12 month PSA nadir group
+
+#starting from 12 months after treatment initiation to death or censor date (months)
+summary(forsurvival_12lndmk$limbo12)#neg min
+
+# Remove records with negative limbo
+forsurvival_12lndmk <- forsurvival_os %>%
+  filter(limbo12 >= 0)
+
+survfit2(Surv(limbo12, dead=="Yes") ~ psa_nadir12gp, data = forsurvival_12lndmk) |>
+  ggsurvfit(linewidth = 1.5) +
+  #add_quantile(quantiles = 0.5, linetype = "dashed", color = "black")#draws both horizontal/vert 50%
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", linewidth = 0.8)+
+  geom_vline(xintercept = 36, linetype = "dashed", color = "black", linewidth = 0.9)+
+  
+  add_risktable(
+    risktable_stats = "n.risk",
+    size = 5,
+    theme = theme_risktable_default(
+      axis.text.y.size = 15,
+      plot.title.size = 15
+    )
+  ) +
+  
+  # add_pvalue(caption = "Log-rank test: {p.value}", size = 5) +
+  
+  coord_cartesian(xlim = c(0, 60)) +
+  scale_x_continuous(breaks = seq(0, 60, 12), expand = c(0.01, 1)) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::label_percent()) +
+  
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 17),
+    axis.title = element_text(color = "black", size = 17),
+    axis.text = element_text(color = "black", size = 17),
+    legend.position = "none")+  # ← removes legend completely
+  #legend.position = c(0.33, 0.25),
+  #legend.direction = "horizontal",
+  #legend.title = element_blank(),
+  #legend.text = element_text(size = 25, color = "black")
+  # ) +
+  
+  labs(
+    title = "",
+    x = "Time from 12-month-landmark (months)",
+    y = "Overall survival"
+  )
+
+#obtain KM estimates and 95% CI
+summary(survfit2(Surv(limbo12, dead=="Yes") ~ psa_nadir12gp, data = forsurvival_12lndmk), times = c(12,24,36))
+
+### Logrank test (overall and pairwise comparisons)
+survdiff(Surv(limbo12, dead=="Yes")~psa_nadir12gp, data = forsurvival_12lndmk, )
+
+#pairwise using bonferroni
+pairwise_survdiff(Surv(limbo12, dead=="Yes")~psa_nadir12gp, data = forsurvival_12lndmk, p.adjust.method = "bonferroni")
+
+# Number of patients who dropped off before reaching 12 months
+n_total <- nrow(forsurvival_os)
+n_dropped_pre12 <- sum(forsurvival_os$limbo < 12, na.rm = TRUE) #256 pt dropped off prior to nadir
+print(n_dropped_pre12)
+
+## Median follow-up
+#This table shows the median follow-up time by treatment regimen. 
+
+tbl_survfit(
+  survfit(Surv(limbo12, dead=="No")~psa_nadir12gp,
+          data = forsurvival_12lndmk),
+  probs = 0.5,
+  label_header = "**Median Follow-Up (95% CI)**",
+  label = list(psa_nadir12gp ~ "PSA group")
+) 
+
+#med survival
+survfit2(Surv(limbo12, dead == "Yes") ~ psa_nadir12gp, data = forsurvival_12lndmk) %>%
+  surv_median()
+
+#deaths before 6/12 months
+forsurvival_os %>%
+  summarise(
+    total_patients = n(),
+    deaths_before_6mo = sum(dead == "Yes" & limbo < 6, na.rm = TRUE),
+    deaths_before_12mo = sum(dead == "Yes" & limbo < 12, na.rm = TRUE),
+    total_deaths = sum(dead == "Yes", na.rm = TRUE)
+  )
+###############################################################################
+#univariate cox regression
+#PSA nadir at 6 months
+###############################################################################
+
+
+foruniv_cox <- cohort %>%
+  select(subject,limbo,limbo6,limbo12, dead, psa_nadir6gp ,psa_nadir12gp, age, pre_tmt_psa20, alk150,met_combo4,
+         denovomet_disease,tmt_regimen,gleason_combined_derived, rp_xrt, n_stage_gp, t_stage_gp, racegp)
+
+#clean vars and change death variable to binary
+#LH updated mets var
+foruniv_cox_6 <- foruniv_cox %>%
+  mutate(
+    dead2 = ifelse(dead == "Yes", 1, 0),
+    racegp = factor(racegp, ordered = FALSE),
+    denovomet_disease2 = ifelse(denovomet_disease %in% c("No", "Unknown"), "No/Unknown", "Yes")
+  ) %>%
+  filter(limbo6 > 0) #no negative survival data 
+
+table(foruniv_cox_6$denovomet_disease2)
+
+
+#first way to run analyses
+explan <- c("age","pre_tmt_psa20","alk150","met_combo4","denovomet_disease2","tmt_regimen","gleason_combined_derived", "psa_nadir6gp",
+            "rp_xrt", "n_stage_gp", "t_stage_gp","racegp")
+
+foruniv_cox_6%>%
+  coxphuni(
+    dependent = "Surv(limbo6,dead2)",
+    explanatory = explan
+  )%>%
+  fit2df() %>%
+  kable(caption = "Univariable Cox Proportional Hazards Model (Time from 6-month Landmark)")
+table(foruniv_cox$tmt_regimen)
+
+#second way
+tbl_uv_ex1 <-
+  tbl_uvregression(
+    data = foruniv_cox_6,
+    method = coxph,
+    y = Surv(limbo6, dead2),
+    include = c(age, pre_tmt_psa20, alk150, met_combo4,
+                denovomet_disease2, tmt_regimen, gleason_combined_derived,
+                psa_nadir6gp, rp_xrt, n_stage_gp, t_stage_gp, racegp),
+    exponentiate = TRUE,
+    pvalue_fun = function(x) style_pvalue(x, digits = 2)
+  )
+tbl_uv_ex1
+
+
+
+###############################################################################
+#MVA cox regression 
+#backward selection
+##PSA nadir at 6 months
+###############################################################################
+foruniv_cox_6mva <- foruniv_cox_6
+
+full_model_6 <- coxph(
+  Surv(limbo6, dead2) ~ age + pre_tmt_psa20 + alk150 + met_combo4 +
+    denovomet_disease2 + tmt_regimen + gleason_combined_derived +
+    psa_nadir6gp + rp_xrt + n_stage_gp + t_stage_gp + racegp,
+  data = foruniv_cox_6mva
+)
+
+
+# Perform backward selection
+step_model_6 <- step(full_model_6, direction = "backward")
+
+# Test proportional hazards assumption - schoenfeld resids
+ph_test <- cox.zph(step_model_6)
+
+# View results
+ph_test #no violation of assumption can proceed with MVA, global 0.07
+
+#checked psa_nadir6gp group through KM stratification;
+# already plotted by KM curve in previous analyses 
+# Fit survival object stratified by psa_nadir6gp for log/log plot
+fit <- survfit(Surv(limbo6, dead == "Yes") ~ psa_nadir6gp, data = foruniv_cox_6mva)# using previous dataset created 
+
+# Plot log(-log) survival curves
+ggsurvplot(
+  fit,
+  data = foruniv_cox_6,
+  fun = "cloglog",  # Complementary log-log = log(-log(survival))
+  xlab = "Time from 6-month landmark (months)",
+  ylab = "log(-log(Survival))",
+  legend.title = "PSA Nadir Group",
+  ggtheme = theme_classic()
+)
+
+
+
+#MVA - final
+final <- coxph(Surv(limbo6, dead2) ~ age + alk150 + met_combo4 + denovomet_disease2 + 
+                 gleason_combined_derived + psa_nadir6gp + rp_xrt
+      ,data = foruniv_cox_6mva) %>% 
+  gtsummary::tbl_regression(exp = TRUE)
+  gtsummary::add_n()
+
+final
+
+
+
+
+###############################################################################
+#univariate cox regression
+#PSA nadir at 12 months
+###############################################################################
+
+
+#clean vars and change death variable to binary
+#LH updated mets var
+foruniv_cox_12 <- foruniv_cox %>%
+  mutate(
+    dead2 = ifelse(dead == "Yes", 1, 0),
+    racegp = factor(racegp, ordered = FALSE),
+    denovomet_disease2 = ifelse(denovomet_disease %in% c("No", "Unknown"), "No/Unknown", "Yes")
+  ) %>%
+  filter(limbo12 > 0) #no negative survival data 
+
+#first way to run analyses
+explan <- c("age","pre_tmt_psa20","alk150","met_combo4","denovomet_disease2","tmt_regimen","gleason_combined_derived", "psa_nadir12gp",
+            "rp_xrt", "n_stage_gp", "t_stage_gp","racegp")
+
+foruniv_cox_12%>%
+  coxphuni(
+    dependent = "Surv(limbo12,dead2)",
+    explanatory = explan
+  )%>%
+  fit2df() %>%
+  kable(caption = "Univariable Cox Proportional Hazards Model (Time from 12-month Landmark)")
+
+
+#second way
+
+tbl_uv_ex2 <-
+  tbl_uvregression(
+    data = foruniv_cox_12,
+    method = coxph,
+    y = Surv(limbo12, dead2),
+    include = c(age, pre_tmt_psa20, alk150, met_combo4,
+                denovomet_disease2, tmt_regimen, gleason_combined_derived,
+                psa_nadir12gp, rp_xrt, n_stage_gp, t_stage_gp, racegp),
+    exponentiate = TRUE,
+    pvalue_fun = function(x) style_pvalue(x, digits = 2)
+  )
+tbl_uv_ex2
+
+###############################################################################
+#MVA cox regression 
+#backward selection
+##PSA nadir at 12 months
+###############################################################################
+full_model_12 <- coxph(
+  Surv(limbo12, dead2) ~ age + pre_tmt_psa20 + alk150 + met_combo4 +
+    denovomet_disease2 + tmt_regimen + gleason_combined_derived +
+    psa_nadir12gp + rp_xrt + n_stage_gp + t_stage_gp + racegp,
+  data = foruniv_cox_12
+)
+summary(full_model_12)
+# Perform backward selection
+step_model <- step(full_model_12, direction = "backward")
+
+# Test proportional hazards assumption
+ph_test <- cox.zph(step_model)
+
+# View results
+ph_test #looks like baseline psa is somewhat violated but overall p value doesn't seem to be, will investigate by looking visually 
+
+# Fit KM model stratified by pre_tmt_psa20
+km_fit <- survfit(Surv(limbo12, dead2) ~ pre_tmt_psa20, data = foruniv_cox_12)
+ggsurvplot(
+  km_fit,
+  data = foruniv_cox_12,
+  pval = TRUE,
+  risk.table = TRUE,
+  surv.median.line = "hv",
+  xlab = "Months since treatment initiation",
+  ylab = "Overall survival probability",
+  legend.title = "Pre-treatment PSA",
+  palette = "Dark2"
+)
+#ok to proceed
+
+#relevel mets var
+foruniv_cox_12 <- foruniv_cox_12 %>%
+  mutate(met_combo4 = relevel(factor(met_combo4), ref = "Bone only"))
+
+
+final_12 <- coxph(Surv(limbo12, dead2) ~ age + pre_tmt_psa20 + alk150 + met_combo4 + 
+                    denovomet_disease2 + gleason_combined_derived + psa_nadir12gp + 
+                    rp_xrt
+               ,data = foruniv_cox_12) %>% 
+  gtsummary::tbl_regression(exp = TRUE)
+
+final_12
+
+
+
+
+#forest plot for ppt 51225 + KAC
+final_12_2 <- coxph(Surv(limbo12, dead2) ~ age + pre_tmt_psa20 + alk150 + met_combo4 + 
+                    denovomet_disease2 + gleason_combined_derived + psa_nadir12gp + 
+                    rp_xrt
+                  ,data = foruniv_cox_12)
+
+ggforest(final_12_2, data = foruniv_cox_12)
+
+ggforest(final_12_2, 
+         data = foruniv_cox_12,
+         main = "MVA 12 landmark PSA Forest Plot",
+        # fontsize = 1.0,                    # adjust font size
+         cpositions = c(0.02, 0.22, 0.4))   # label positions: covariate, HR, CI
+
+
+#second option by just selecting significant factors and can provide footnote advising "adjusted for"
+# Show only selected variables in the plot
+final_12_tbl_subset <- final_12%>%
+  modify_table_body(~ .x %>%
+                      dplyr::filter(variable %in% c("psa_nadir12gp", "age", "gleason_combined_derived"))
+  ) %>%
+  modify_caption("**Forest Plot: Adjusted for age, pre-treatment PSA, ALP, de novo status, and RP/XRT**")
+
+# Plot it
+plot(final_12_tbl_subset)
+
+################################################################################
+#PFS analysis
+#6 landmark
+#limbo6 is already defined as:months from 6 months after treatment start to either death or censoring
+#progression_post6 = 1 is assigned if: Progression (any_progression == 1) or Death (dead == "Yes")AND the event occurred after 6 months (limbo > 6)
+
+#If neither occurred, the patient is censored at new_censor_date, which is included in how limbo and limbo6 are computed
+################################################################################
+table(cohort$any_progression)
+
+# Create a unified event date: first of progression, death, or censor
+cohortfull_6 <- cohort %>%
+  mutate(
+    any_progression = replace_na(any_progression, 0),
+    dead_bin = ifelse(dead == "Yes", 1, 0),
+    
+    # Get earliest event
+    pfs_event_date = pmin(prog_date, deathdate_int, new_censor_date, na.rm = TRUE),
+    
+    # Time from treatment to event
+    limbo_pfs = time_length(pfs_event_date - dt_lot_start1, "month"),
+    
+    # Landmark-adjusted time
+    limbo6_pfs = limbo_pfs - 6
+  )
+
+
+landmark6_pfs <- cohortfull_6 %>%
+  filter(limbo6_pfs >= 0) %>%
+  mutate(
+    progression_post6 = ifelse((any_progression == 1 | dead_bin == 1) & limbo_pfs > 6, 1, 0),
+    PFS_post6 = limbo6_pfs
+  ) 
+
+
+
+#plot
+survfit2(Surv(PFS_post6, progression_post6) ~ psa_nadir6gp, data = landmark6_pfs) |>
+  #ggsurvfit(linewidth = 1) +
+  ggsurvfit(linewidth = 1.5) +
+  #add_quantile(quantiles = 0.5, linetype = "dashed", color = "black")#draws both horizontal/vert 50%
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", linewidth = 0.8)+
+ # geom_vline(xintercept = 36, linetype = "dashed", color = "black", linewidth = 0.9)+
+  
+  add_risktable(
+    risktable_stats = "n.risk",
+    size = 5,
+    theme = theme_risktable_default(
+      axis.text.y.size = 15,
+      plot.title.size = 15
+    )
+  ) +
+  
+  # add_pvalue(caption = "Log-rank test: {p.value}", size = 5) +
+  
+  coord_cartesian(xlim = c(0, 60)) +
+  scale_x_continuous(breaks = seq(0, 60, 12), expand = c(0.01, 1)) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::label_percent()) +
+  
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 17),
+    axis.title = element_text(color = "black", size = 17),
+    axis.text = element_text(color = "black", size = 17),
+    legend.position = "none")+  # ← removes legend completely
+  #legend.position = c(0.33, 0.25),
+  #legend.direction = "horizontal",
+  #legend.title = element_blank(),
+  #legend.text = element_text(size = 25, color = "black")
+  # ) +
+  
+  labs(
+    title = "",
+    x = "Time from 6-month landmark (months)",
+    y = "Progression-free survival probability"
+  )
+
+
+#obtain KM estimates and 95% CI
+summary(survfit2(Surv(PFS_post6, progression_post6) ~ psa_nadir6gp, data = landmark6_pfs), times = c(12,24,36))
+
+### Logrank test (overall and pairwise comparisons)
+survdiff(Surv(PFS_post6, progression_post6) ~ psa_nadir6gp, data = landmark6_pfs, )
+
+#pairwise using bonferroni
+pairwise_survdiff(Surv(PFS_post6, progression_post6) ~ psa_nadir6gp, data = landmark6_pfs, p.adjust.method = "bonferroni")
+
+
+#patients who progressed before 6 months
+cohortfull_6 %>%
+  summarise(
+    total_patients = n(),
+    pfs_events_before_6mo = sum((any_progression == 1 | dead_bin == 1) & limbo_pfs < 6, na.rm = TRUE),
+    pfs_events_before_12mo = sum((any_progression == 1 | dead_bin == 1) & limbo_pfs < 12, na.rm = TRUE),
+    total_pfs_events = sum(any_progression == 1 | dead_bin == 1, na.rm = TRUE)
+  )
+
+
+
+table(cohortfull_12$any_progression)
+
+
+landmark6_pfs %>%
+  summarise(
+    n_landmark_patients = n(),
+    events_after_6mo = sum(progression_post6 == 1, na.rm = TRUE)
+  )
+################################################################################
+#PFS analysis
+#12 landmark
+################################################################################
+#table(cohort$any_progression)
+# Create a unified event date: first of progression, death, or censor
+cohortfull_12 <- cohort %>%
+  mutate(
+    any_progression = replace_na(any_progression, 0),
+    dead_bin = ifelse(dead == "Yes", 1, 0),
+    
+    # Get earliest event
+    pfs_event_date = pmin(prog_date, deathdate_int, new_censor_date, na.rm = TRUE),
+    
+    # Time from treatment to event
+    limbo_pfs = time_length(pfs_event_date - dt_lot_start1, "month"),
+    
+    # Landmark-adjusted time
+    limbo12_pfs = limbo_pfs - 12
+  )
+
+landmark12_pfs <- cohortfull_12 %>%
+  filter(limbo12_pfs >= 0) %>%
+  mutate(
+    progression_post12 = ifelse((any_progression == 1 | dead_bin == 1) & limbo_pfs > 12, 1, 0),
+    PFS_post12 = limbo12_pfs
+  ) 
+table(landmark12_pfs$progression_post12)
+table(landmark12_pfs$progression_post12, landmark12_pfs$dead_bin)
+
+#clarify breakdown
+table(landmark12_pfs$progression_post12)
+
+survfit2(Surv(PFS_post12, progression_post12) ~ psa_nadir12gp, data = landmark12_pfs) |>
+  ggsurvfit(linewidth = 1.5) +
+  #add_quantile(quantiles = 0.5, linetype = "dashed", color = "black")#draws both horizontal/vert 50%
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", linewidth = 0.8)+
+  geom_vline(xintercept = 36, linetype = "dashed", color = "black", linewidth = 0.9)+
+  
+  add_risktable(
+    risktable_stats = "n.risk",
+    size = 5,
+    theme = theme_risktable_default(
+      axis.text.y.size = 15,
+      plot.title.size = 15
+    )
+  ) +
+  
+  # add_pvalue(caption = "Log-rank test: {p.value}", size = 5) +
+  
+  coord_cartesian(xlim = c(0, 60)) +
+  scale_x_continuous(breaks = seq(0, 60, 12), expand = c(0.01, 1)) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::label_percent()) +
+  
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 17),
+    axis.title = element_text(color = "black", size = 17),
+    axis.text = element_text(color = "black", size = 17),
+    legend.position = "none")+  # ← removes legend completely
+  #legend.position = c(0.33, 0.25),
+  #legend.direction = "horizontal",
+  #legend.title = element_blank(),
+  #legend.text = element_text(size = 25, color = "black")
+  # ) +
+  
+  labs(
+    title = "",
+    x = "Time from 12-month landmark (months)",
+    y = "Progression-free survival probability"
+  )
+
+
+
+#obtain KM estimates and 95% CI
+summary(survfit2(Surv(PFS_post12, progression_post12) ~ psa_nadir12gp, data = landmark12_pfs), times = c(12,24,36))
+
+### Logrank test (overall and pairwise comparisons)
+survdiff(Surv(PFS_post12, progression_post12) ~ psa_nadir12gp, data = landmark12_pfs, )
+
+#pairwise using bonferroni
+pairwise_survdiff(Surv(PFS_post12, progression_post12) ~ psa_nadir12gp, data = landmark12_pfs, p.adjust.method = "bonferroni")
+
+
+
+
+
+
+#checking relationship between progression and death
+table(landmark12_pfs$progression_post12, landmark12_pfs$dead)
+
+# Recreating cross tab for visual 
+df <- data.frame(
+  progression_post12 = c("No Progression", "No Progression", "Progression", "Progression"),
+  dead = c("Alive", "Dead", "Alive", "Dead"),
+  count = c(707, 75, 84, 96)
+)
+
+
+landmark12_pfs %>%
+  summarise(
+    n_landmark_patients = n(),
+    events_after_12mo = sum(progression_post12 == 1, na.rm = TRUE)
+  )
+
+
+# Plot
+#Of the 180 patients who experienced disease progression after the 12-month landmark, 96 (53%) subsequently died. An additional 75 patients (43.9% of deaths) died without documented progression, 
+#contributing to the observed similarity between progression-free and overall survival estimates.
+ggplot(df, aes(x = progression_post12, y = count, fill = dead)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Survival Status by Progression Status",
+    x = "Progression Status",
+    y = "Number of Patients",
+    fill = "Survival Status"
+  ) +
+  theme_classic() +
+  scale_fill_manual(values = c("Alive" = "#66c2a5", "Dead" = "#fc8d62"))
+
+
+
+
+#Running simple PFS survival 12 month
+surv_obj <- Surv(time = landmark12_pfs$PFS_post12, event = landmark12_pfs$progression_post12)
+
+# Fit KM model stratified by PSA nadir group
+km_fit <- survfit(surv_obj ~ psa_nadir12gp, data = landmark12_pfs)
+
+#3 year PFS
+summary(km_fit, times = 36)
+#<0.1 : 87.27%
+#0.10 -- 0.19 : 73.72%
+#>=0.2: 41.40%
+
+
+# Plot
+ggsurvplot(
+  km_fit,
+  data = landmark12,
+  xlab = "Months Since 12-Month Landmark",
+  ylab = "Progression-Free Survival",
+  title = "12-Month Landmark PFS by PSA Nadir Group",
+  pval = TRUE,
+  conf.int = TRUE,
+  risk.table = TRUE
+)
+
+
+#rmarkdown::render("foranalysis42925.R", output_format = "html_document")
+
+#We are definitely missing progressions but it might just be a major limiation. 
+#Can you tabulate progression and enrollment year to see if there are any from earlier years? And progression x relapse to see how much overlap.
+# Tabulate progression by enrollment_year
+tbl1 <- tbl_cross(data = landmark12_pfs, row = progression_post12, col = relapse) %>%
+  as_gt()
+
+tbl1
+
+tbl2 <- tbl_cross(data = landmark12_pfs, row = progression_post12, col = year_consent) %>%
+  as_gt()
+tbl2
+
+
+tbl3 <- tbl_cross(data = landmark12_pfs, row = progression_post12, col = year) %>%
+  as_gt()
+
+# Print all three
+tbl1
+tbl2
+tbl3
+
+#tables <- list(
+#  tbl_cross(data = landmark12, row = progression_post12, col = relapse) %>% as_gt(),
+#  tbl_cross(data = landmark12, row = progression_post12, col = year_consent) %>% as_gt(),
+#  tbl_cross(data = landmark12, row = progression_post12, col = year) %>% as_gt()
+#)
+
+# Print all tables in order
+#for (t in tables) print(t)
+
+#cleaning up plot
+###############################################################################
+#univariate PFS 
+#6 month
+##############################################################################
+foruniv_pfs_6 <- landmark6_pfs %>%
+  filter(PFS_post6 > 0) %>%
+  mutate(
+    racegp = factor(racegp, ordered = FALSE),
+    dead2 = dead_bin,
+    denovomet_disease2 = ifelse(denovomet_disease %in% c("No", "Unknown"), "No/Unknown", "Yes")
+  )
+
+
+# Define variables for univariable analysis
+explan_pfs <- c("age", "pre_tmt_psa20", "alk150", "met_combo4", "denovomet_disease2",
+                "tmt_regimen", "gleason_combined_derived", "psa_nadir6gp", 
+                "rp_xrt", "n_stage_gp", "t_stage_gp", "racegp")
+
+# Run univariable Cox for PFS from 6-month landmark
+#survfit2(Surv(PFS_post6, progression_post6) ~ psa_nadir6gp, data = landmark6_pfs) |>
+
+
+foruniv_pfs_6 %>%
+  coxphuni(
+    dependent = "Surv(PFS_post6, progression_post6)",
+    explanatory = explan_pfs
+  ) %>%
+  fit2df() %>%
+  kable(caption = "Univariable Cox Proportional Hazards Model (PFS from 6-month Landmark)")
+tabel()
+
+
+
+#second way
+
+tbl_uv_ex3 <-
+  tbl_uvregression(
+    data = foruniv_pfs_6,
+    method = coxph,
+    y = Surv(PFS_post6, progression_post6),
+    include = c(age, pre_tmt_psa20, alk150, met_combo4,
+                denovomet_disease2, tmt_regimen, gleason_combined_derived,
+                psa_nadir6gp, rp_xrt, n_stage_gp, t_stage_gp, racegp),
+    exponentiate = TRUE,
+    pvalue_fun = function(x) style_pvalue(x, digits = 2)
+  )
+tbl_uv_ex3
+
+
+###############################################################################
+#MVA cox regression PFS 
+#backward selection
+##PSA nadir at 6 months
+###############################################################################
+foruniv_pfs_6_mva <- foruniv_pfs_6
+
+full_model_7 <- coxph(
+  Surv(PFS_post6, progression_post6) ~ age + pre_tmt_psa20 + alk150 + met_combo4 +
+    denovomet_disease2 + tmt_regimen + gleason_combined_derived +
+    psa_nadir6gp + rp_xrt + n_stage_gp + t_stage_gp + racegp,
+  data = foruniv_pfs_6_mva
+)
+
+
+
+# Perform backward selection
+step_model_7 <- step(full_model_7, direction = "back")
+
+# Test proportional hazards assumption - schoenfeld resids
+ph_test <- cox.zph(step_model_7)
+
+# View results
+ph_test #violation of psa nadir 
+
+#check via loglogplot
+fit <- survfit(Surv(PFS_post6, progression_post6) ~ psa_nadir6gp, data = foruniv_pfs_6_mva)# using previous dataset created 
+ggsurvplot(
+  fit,
+  data = foruniv_pfs_6_mva,
+  fun = "cloglog",  # Complementary log-log = log(-log(survival))
+  xlab = "Time from 6-month landmark (months)",
+  ylab = "log(-log(Survival))",
+  legend.title = "PSA Nadir Group",
+  ggtheme = theme_classic()
+)
+#looks ok
+
+#MVA final
+final_06 <- coxph(Surv(PFS_post6, progression_post6) ~ age + alk150 + met_combo4 + 
+                    psa_nadir6gp + rp_xrt
+                  ,data = foruniv_pfs_6_mva) %>% 
+  gtsummary::tbl_regression(exp = TRUE)
+
+final_06
+
+
+
+#looking at psa nadir 6
+# Make sure psa_nadir6gp is a factor
+#foruniv_pfs_6_mva <- foruniv_pfs_6_mva %>%
+  mutate(psa_nadir6gp = factor(psa_nadir6gp))
+
+
+#set ref
+#foruniv_pfs_6_mva <- foruniv_pfs_6_mva %>%
+ # mutate(psa_nadir6gp = relevel(factor(psa_nadir6gp), ref = "<0.1"))
+#attach(foruniv_pfs_6_mva)
+
+# Fit Cox model with time-varying effect via interaction with log(time)
+#cox_tv <- coxph(Surv(PFS_post6, progression_post6) ~ 
+           #       age + alk150 + met_combo4 + rp_xrt +
+            #      tt(psa_nadir6gp),
+             #   data = foruniv_pfs_6_mva,
+              #  tt = function(x, t, ...) {
+               #   model.matrix(~ x - 1) * log(t)
+              #  })
+
+# View results
+#summary(cox_tv)
+
+
+
+#checked psa_nadir6gp group through KM stratification;
+# already plotted by KM curve in previous analyses 
+
+
+
+
+###############################################################################
+#univariate PFS 
+#12 month
+##############################################################################
+foruniv_pfs_12 <- landmark12_pfs %>%
+  filter(PFS_post12 > 0) %>%
+  mutate(
+    racegp = factor(racegp, ordered = FALSE),
+    dead2 = dead_bin,
+    denovomet_disease2 = ifelse(denovomet_disease %in% c("No", "Unknown"), "No/Unknown", "Yes")
+  )
+
+
+# Define variables for univariable analysis
+explan_pfs <- c("age", "pre_tmt_psa20", "alk150", "met_combo4", "denovomet_disease2",
+                "tmt_regimen", "gleason_combined_derived", "psa_nadir12gp", 
+                "rp_xrt", "n_stage_gp", "t_stage_gp", "racegp")
+
+# Run univariable Cox for PFS from 6-month landmark
+#survfit2(Surv(PFS_post6, progression_post6) ~ psa_nadir6gp, data = landmark6_pfs) |>
+
+
+foruniv_pfs_12 %>%
+  coxphuni(
+    dependent = "Surv(PFS_post12, progression_post12)",
+    explanatory = explan_pfs
+  ) %>%
+  fit2df() %>%
+  kable(caption = "Univariable Cox Proportional Hazards Model (PFS from 6-month Landmark)")
+tabel()
+
+
+
+#second way
+
+tbl_uv_ex3 <-
+  tbl_uvregression(
+    data = foruniv_pfs_12,
+    method = coxph,
+    y = Surv(PFS_post12, progression_post12),
+    include = c(age, pre_tmt_psa20, alk150, met_combo4,
+                denovomet_disease2, tmt_regimen, gleason_combined_derived,
+                psa_nadir12gp, rp_xrt, n_stage_gp, t_stage_gp, racegp),
+    exponentiate = TRUE,
+    pvalue_fun = function(x) style_pvalue(x, digits = 2)
+  )
+tbl_uv_ex3
+
+
+###############################################################################
+#MVA cox regression PFS 
+#backward selection
+##PSA nadir at 6 months
+###############################################################################
+foruniv_pfs_12_mva <- foruniv_pfs_12
+
+full_model_8 <- coxph(
+  Surv(PFS_post12, progression_post12) ~ age + pre_tmt_psa20 + alk150 + met_combo4 +
+    denovomet_disease2 + tmt_regimen + gleason_combined_derived +
+    psa_nadir12gp + rp_xrt + n_stage_gp + t_stage_gp + racegp,
+  data = foruniv_pfs_12_mva
+)
+
+
+# Perform backward selection
+full_model_8 <- step(full_model_8, direction = "backward")
+
+# Test proportional hazards assumption - schoenfeld resids
+ph_test <- cox.zph(full_model_8)
+
+# View results
+ph_test #no violation of assumption can proceed with MVA, global 0.07
+
+#checked met_combo4 group through KM stratification;
+# already plotted by KM curve in previous analyses 
+# Fit survival object stratified by psa_nadir6gp for log/log plot
+
+# Plot log(-log) survival curves for mets
+fit1 <- survfit(Surv(PFS_post12, progression_post12) ~ met_combo4, data = foruniv_pfs_12_mva)# using previous dataset created 
+ggsurvplot(
+  fit1,
+  data = foruniv_pfs_12_mva,
+  fun = "cloglog",  # Complementary log-log = log(-log(survival))
+  xlab = "Time from 6-month landmark (months)",
+  ylab = "log(-log(Survival))",
+  legend.title = "mets",
+  ggtheme = theme_classic()
+)
+
+#many levels, violation
+table(foruniv_pfs_6_mva$met_combo4, foruniv_pfs_6_mva$progression_post6)
+
+fit2 <- survfit(Surv(PFS_post12, progression_post12) ~ psa_nadir12gp, data = foruniv_pfs_12_mva)# using previous dataset created 
+ggsurvplot(
+  fit2,
+  data = foruniv_pfs_12_mva,
+  fun = "cloglog",  # Complementary log-log = log(-log(survival))
+  xlab = "Time from 6-month landmark (months)",
+  ylab = "log(-log(Survival))",
+  legend.title = "psa_nadir12gp  ",
+  ggtheme = theme_classic()
+)
+
+
+#does not seem to violate - ok to proceed with model without met_combo4
+
+#MVA - final
+final <- coxph(Surv(PFS_post12, progression_post12) ~ age + alk150  + 
+                 psa_nadir12gp + rp_xrt
+               ,data = foruniv_pfs_12_mva) %>% 
+  gtsummary::tbl_regression(exp = TRUE)
+gtsummary::add_n()
+
+final
+
+
